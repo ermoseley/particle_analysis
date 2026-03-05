@@ -222,17 +222,26 @@ def compute_colorbar_range(
     return vmin, vmax
 
 
+# Default frame size: 1080p (1920x1080) true HD
+FRAME_WIDTH_PX = 1920
+FRAME_HEIGHT_PX = 1080
+FRAME_DPI = 96
+
+
 def render_frame(
     gas_col: np.ndarray,
     dust_col: np.ndarray,
     vmin: float,
     vmax: float,
     out_path: Path,
-    dpi: int = 120,
+    dpi: int | None = None,
 ) -> None:
     """Draw gas and dust column density panels with shared log colorbar; save PNG."""
+    if dpi is None:
+        dpi = FRAME_DPI
+    figsize = (FRAME_WIDTH_PX / dpi, FRAME_HEIGHT_PX / dpi)
     norm = LogNorm(vmin=vmin, vmax=vmax)
-    fig, axes = plt.subplots(1, 2, figsize=(10, 5), constrained_layout=True)
+    fig, axes = plt.subplots(1, 2, figsize=figsize, constrained_layout=True)
     axes[0].imshow(gas_col.T, origin="lower", norm=norm, cmap="inferno")
     axes[0].set_title("Gas column density")
     axes[0].set_xlabel("x")
