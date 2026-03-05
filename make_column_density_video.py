@@ -271,61 +271,89 @@ def main() -> None:
     )
     ap.add_argument("--cache-gas", action="store_true", help="Cache gas cubes as gas_XXXXX.cube")
     ap.add_argument("--keep-frames", action="store_true", help="Do not delete frames dir after encoding")
+    ap.add_argument(
+        "--ffmpeg-only",
+        action="store_true",
+        help="Skip rendering; only run ffmpeg on existing frame_*.png in --frames-dir",
+    )
     args = ap.parse_args()
 
     run_dir = args.run_dir.resolve()
     if not run_dir.is_dir():
         raise SystemExit(f"Run directory not found: {run_dir}")
 
-    output_numbers = get_output_numbers(run_dir, args.start, args.end)
     frames_dir = args.frames_dir if args.frames_dir is not None else run_dir / "frames_col"
     frames_dir = frames_dir.resolve()
-    frames_dir.mkdir(parents=True, exist_ok=True)
 
-    # Precompute colorbar from last output
-    last = output_numbers[-1]
-    print(f"Computing colorbar range from last output {last} ...")
-    gas_col_last = get_gas_column(run_dir, last, args.nx, cache=args.cache_gas)
-    dust_col_last = get_dust_column(run_dir, last, args.nx)
-    # Normalize to mean 1 for comparability (same as plot_dust_gas)
-    mg = np.mean(gas_col_last)
-    md = np.mean(dust_col_last)
-    if mg <= 0:
-        mg = 1.0
-    if md <= 0:
-        md = 1.0
-    gas_col_last = gas_col_last / mg
-    dust_col_last = dust_col_last / md
-    vmin, vmax = compute_colorbar_range(gas_col_last, dust_col_last)
-    print(f"  vmin={vmin:.2e}, vmax={vmax:.2e}")
+    if args.ffmpeg_only:
+        # Discover existing frame_XXXXX.png and encode only
+        import re
+        if not frames_dir.is_dir():
+            raise SystemExit(f"Frames directory not found: {frames_dir}")
+        frame_pattern = re.compile(r"frame_(\d+)\.png$")
+        found = []
+        for f in frames_dir.iterdir():
+            if f.is_file():
+                m = frame_pattern.match(f.name)
+                if m:
+                    found.append((int(m.group(1)), f.name))
+        if not found:
+            raise SystemExit(f"No frame_*.png found in {frames_dir}")
+        frame_names = [name for _, name in sorted(found)]
+        print(f"Found {len(frame_names)} frames in {frames_dir}")
+    else:
+        output_numbers = get_output_numbers(run_dir, args.start, args.end)
+        frames_dir.mkdir(parents=True, exist_ok=True)
 
-    # Render all frames
-    n_frames = len(output_numbers)
-    for i, output_num in enumerate(output_numbers):
-        if (i + 1) % 10 == 0 or i == 0:
-            print(f"Frame {i + 1}/{n_frames} (output_{output_num:05d})")
-        gas_col = get_gas_column(run_dir, output_num, args.nx, cache=args.cache_gas)
-        dust_col = get_dust_column(run_dir, output_num, args.nx)
-        mg = np.mean(gas_col)
-        md = np.mean(dust_col)
+        # Precompute colorbar from last output
+        last = output_numbers[-1]
+        print(f"Computing colorbar range from last output {last} ...")
+        gas_col_last = get_gas_column(run_dir, last, args.nx, cache=args.cache_gas)
+        dust_col_last = get_dust_column(run_dir, last, args.nx)
+        # Normalize to mean 1 for comparability (same as plot_dust_gas)
+        mg = np.mean(gas_col_last)
+        md = np.mean(dust_col_last)
         if mg <= 0:
             mg = 1.0
         if md <= 0:
             md = 1.0
-        gas_col = gas_col / mg
-        dust_col = dust_col / md
-        out_path = frames_dir / f"frame_{output_num:05d}.png"
-        render_frame(gas_col, dust_col, vmin, vmax, out_path)
+        gas_col_last = gas_col_last / mg
+        dust_col_last = dust_col_last / md
+        vmin, vmax = compute_colorbar_range(gas_col_last, dust_col_last)
+        print(f"  vmin={vmin:.2e}, vmax={vmax:.2e}")
+
+        # Render all frames
+        n_frames = len(output_numbers)
+        for i, output_num in enumerate(output_numbers):
+            if (i + 1) % 10 == 0 or i == 0:
+                print(f"Frame {i + 1}/{n_frames} (output_{output_num:05d})")
+            gas_col = get_gas_column(run_dir, output_num, args.nx, cache=args.cache_gas)
+            dust_col = get_dust_column(run_dir, output_num, args.nx)
+            mg = np.mean(gas_col)
+            md = np.mean(dust_col)
+            if mg <= 0:
+                mg = 1.0
+            if md <= 0:
+                md = 1.0
+            gas_col = gas_col / mg
+            dust_col = dust_col / md
+            out_path = frames_dir / f"frame_{output_num:05d}.png"
+            render_frame(gas_col, dust_col, vmin, vmax, out_path)
 
     # Use concat demuxer so non-contiguous output numbers (e.g. --start 10 --end 20) work.
     list_file = frames_dir / "frame_list.txt"
     duration_sec = 1.0 / args.fps
     with open(list_file, "w") as f:
-        for output_num in output_numbers:
-            f.write(f"file 'frame_{output_num:05d}.png'\n")
-            f.write(f"duration {duration_sec}\n")
-        # concat demuxer requires last file again (no duration after it)
-        f.write(f"file 'frame_{output_numbers[-1]:05d}.png'\n")
+        if args.ffmpeg_only:
+            for name in frame_names:
+                f.write(f"file '{name}'\n")
+                f.write(f"duration {duration_sec}\n")
+            f.write(f"file '{frame_names[-1]}'\n")
+        else:
+            for output_num in output_numbers:
+                f.write(f"file 'frame_{output_num:05d}.png'\n")
+                f.write(f"duration {duration_sec}\n")
+            f.write(f"file 'frame_{output_numbers[-1]:05d}.png'\n")
 
     out_video = args.out_video.resolve()
     if not out_video.is_absolute():
@@ -353,11 +381,11 @@ def main() -> None:
         raise SystemExit(f"ffmpeg failed with code {result.returncode}")
     print(f"Saved {out_video}")
 
-    if not args.keep_frames:
+    if not args.ffmpeg_only and not args.keep_frames:
         import shutil
         shutil.rmtree(frames_dir)
         print("Removed frames directory.")
-    else:
+    elif not args.ffmpeg_only:
         print(f"Frames left in {frames_dir}")
 
 
