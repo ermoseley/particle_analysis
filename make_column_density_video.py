@@ -472,6 +472,7 @@ def main() -> None:
         "ffmpeg", "-y", "-f", "concat", "-safe", "0",
         "-i", str(list_file),
         "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-crf", "18",  # high quality (default 23; lower = better, 18 ~ visually lossless)
         str(out_video),
     ]
     print("Running ffmpeg ...")
@@ -482,6 +483,7 @@ def main() -> None:
             "ffmpeg", "-y", "-f", "concat", "-safe", "0",
             "-i", str(list_file),
             "-c:v", "mpeg4", "-pix_fmt", "yuv420p",
+            "-q:v", "2",  # high quality for mpeg4 (2-5 = high)
             str(out_video),
         ]
         result = subprocess.run(cmd, cwd=str(frames_dir))
