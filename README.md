@@ -30,6 +30,7 @@ You need `gfortran`. The binary `utils/f90/part2cube` is used by `plot_denoised_
 - **utils/f90/part2cube.f90** — build 3D tracer density cubes from particle files (NGP/CIC/TSC/PCS).
 - **make_column_density_video.py** — gas + dust column-density frames and MP4 (shared helpers for gas/dust columns).
 - **make_dust_alpha_gas_video.py** — same inputs, but gas uses colorcet **isolum** (log column / mean) and dust modulates darkness (alpha); default projection integrates along **x** (`--axis x`).
+- **make_dust_grainsize_gas_video.py** — gas uses colorcet **CET_I3** and the dust overlay color tracks the LOS mass-weighted mean grain size while dust alpha still follows dust column density; default projection integrates along **x** (`--axis x`).
 
 ## Column-density videos
 
@@ -42,14 +43,18 @@ python make_column_density_video.py --run-dir /path/to/run --start 1 --end 50
 # Gas hue (isolum) + dust as shade; default integrate along x
 python make_dust_alpha_gas_video.py --run-dir /path/to/run --start 1 --end 50
 
-# Same as above but line-of-sight along z (matches classic xy maps)
-python make_dust_alpha_gas_video.py --run-dir /path/to/run --start 1 --end 50 --axis z
+# Gas CET_I3 + dust grain-size color (yellow -> black), default integrate along x
+python make_dust_grainsize_gas_video.py --run-dir /path/to/run --start 1 --end 50
+
+# Same grain-size movie but line-of-sight along z (matches classic xy maps)
+python make_dust_grainsize_gas_video.py --run-dir /path/to/run --start 1 --end 50 --axis z
 ```
 
 Re-encode existing frames only:
 
 ```bash
 python make_dust_alpha_gas_video.py --ffmpeg-only --frames-dir /path/to/run/frames_dust_alpha
+python make_dust_grainsize_gas_video.py --ffmpeg-only --frames-dir /path/to/run/frames_dust_grainsize
 ```
 
 ## Run directories
