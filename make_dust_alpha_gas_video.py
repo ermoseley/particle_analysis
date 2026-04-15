@@ -114,9 +114,9 @@ def render_frame(
         cax=cax_d,
         orientation="vertical",
     )
-    cb_d.set_label(DUST_CB_LABEL)
-    # Dust label on the left of the colorbar; ticks on the right (toward plot) to avoid overlap
-    cb_d.ax.yaxis.set_ticks_position("right")
+    # Dust: ticks and axis label both on the left (outer) side of the colorbar
+    cb_d.set_label(DUST_CB_LABEL, labelpad=14)
+    cb_d.ax.yaxis.set_ticks_position("left")
     cb_d.ax.yaxis.set_label_position("left")
 
     cb_g = fig.colorbar(
