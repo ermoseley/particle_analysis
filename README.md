@@ -10,7 +10,7 @@ Install with:
 pip install -r requirements.txt
 ```
 
-Requires: **numpy**, **matplotlib**, **scipy**, **astropy** (for `miniramses` when building gas cubes from AMR).
+Requires: **numpy**, **matplotlib**, **scipy**, **astropy** (for `miniramses` when building gas cubes from AMR), and **colorcet** (for `make_dust_alpha_gas_video.py`).
 
 ## Build part2cube
 
@@ -28,6 +28,29 @@ You need `gfortran`. The binary `utils/f90/part2cube` is used by `plot_denoised_
 - **denoise_cube.py** — Wiener / Gaussian SNR denoising; called as a subprocess and used for the saved Wiener filter.
 - **utils/py/miniramses.py** — read AMR outputs and build gas density cubes (`rd_cell`, `mk_cube`).
 - **utils/f90/part2cube.f90** — build 3D tracer density cubes from particle files (NGP/CIC/TSC/PCS).
+- **make_column_density_video.py** — gas + dust column-density frames and MP4 (shared helpers for gas/dust columns).
+- **make_dust_alpha_gas_video.py** — same inputs, but gas uses colorcet **isolum** (log column / mean) and dust modulates darkness (alpha); default projection integrates along **x** (`--axis x`).
+
+## Column-density videos
+
+From this directory, with `ffmpeg` on your `PATH`:
+
+```bash
+# Side-by-side gas and dust (log scale, inferno), integrate along z
+python make_column_density_video.py --run-dir /path/to/run --start 1 --end 50
+
+# Gas hue (isolum) + dust as shade; default integrate along x
+python make_dust_alpha_gas_video.py --run-dir /path/to/run --start 1 --end 50
+
+# Same as above but line-of-sight along z (matches classic xy maps)
+python make_dust_alpha_gas_video.py --run-dir /path/to/run --start 1 --end 50 --axis z
+```
+
+Re-encode existing frames only:
+
+```bash
+python make_dust_alpha_gas_video.py --ffmpeg-only --frames-dir /path/to/run/frames_dust_alpha
+```
 
 ## Run directories
 

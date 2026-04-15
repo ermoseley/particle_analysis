@@ -2,3 +2,4 @@ numpy>=1.20
 matplotlib>=3.3
 scipy>=1.7
 astropy>=5.0
+colorcet>=3.0.0

@@ -42,20 +42,22 @@ FLOOR = 1e-30  # small floor for log10(column density)
 
 
 def cic_deposit_2d(
-    positions: np.ndarray,
+    pos_xy: np.ndarray,
     masses: np.ndarray,
     nx: int,
     box_size: float = 1.0,
 ) -> np.ndarray:
-    """Cloud-in-cell deposit of particles onto a 2D grid (x, y only).
+    """Cloud-in-cell deposit of particles onto a 2D grid.
 
-    positions: (N, 2) or (N, 3) in [0, box_size]; only first two columns used.
+    pos_xy: (N, 2) positions in [0, box_size] for the two in-plane coordinates.
     Returns mass per cell, shape (nx, nx).
     """
-    pos_xy = np.asarray(positions[:, :2], dtype=np.float64)
+    pos_xy = np.asarray(pos_xy, dtype=np.float64)
+    if pos_xy.ndim != 2 or pos_xy.shape[1] != 2:
+        raise ValueError("pos_xy must have shape (N, 2)")
     masses = np.asarray(masses, dtype=np.float64).ravel()
     if pos_xy.shape[0] != masses.shape[0]:
-        raise ValueError("positions and masses length mismatch")
+        raise ValueError("pos_xy and masses length mismatch")
     dx = box_size / nx
     grid = np.zeros((nx, nx), dtype=np.float64)
 
@@ -136,15 +138,16 @@ def get_gas_column(
     output_num: int,
     nx: int,
     cache: bool = False,
+    axis: str = "z",
 ) -> np.ndarray:
-    """Load gas density cube, resample to nx^3, return column density along z."""
+    """Load gas density cube, resample to nx^3, return column density integrated along ``axis``."""
     run_dir = Path(run_dir)
     gas_file = run_dir / f"gas_{output_num:05d}.cube"
     if cache and gas_file.exists():
         cube = read_cube_fortran(gas_file)
         if cube.shape != (nx, nx, nx):
             cube = _resample_cube(cube, nx, nx, nx)
-        return column_density(cube, axis="z")
+        return column_density(cube, axis=axis)
 
     import miniramses as ram
     with _silent_stdout():
@@ -156,10 +159,28 @@ def get_gas_column(
         cube = _resample_cube(cube, nx, nx, nx)
     if cache:
         save_cube_fortran(cube, gas_file)
-    return column_density(cube, axis="z")
+    return column_density(cube, axis=axis)
 
 
-def get_dust_column(run_dir: Path, output_num: int, nx: int, box_size: float = 1.0) -> np.ndarray:
+def _dust_pos_plane(pos: np.ndarray, axis: str) -> np.ndarray:
+    """Select (N,2) coordinates perpendicular to line-of-sight ``axis`` for column projection."""
+    ax = axis.lower()
+    if ax == "z":
+        return pos[:, [0, 1]]
+    if ax == "y":
+        return pos[:, [0, 2]]
+    if ax == "x":
+        return pos[:, [1, 2]]
+    raise ValueError(f"axis must be 'x', 'y', or 'z', got {axis!r}")
+
+
+def get_dust_column(
+    run_dir: Path,
+    output_num: int,
+    nx: int,
+    box_size: float = 1.0,
+    axis: str = "z",
+) -> np.ndarray:
     """Load dust particles and deposit onto 2D grid with CIC; return column mass map."""
     import miniramses as ram
     p = ram.rd_part(output_num, path=str(run_dir) + "/", prefix="dust", silent=True)
@@ -168,13 +189,13 @@ def get_dust_column(run_dir: Path, output_num: int, nx: int, box_size: float = 1
     # p.pos is (ndim, npart); convert to (npart, ndim)
     pos = np.column_stack([p.pos[i] for i in range(p.pos.shape[0])])
     masses = np.asarray(p.mass, dtype=np.float64).ravel()
-    # Drop particles with invalid (x, y) to avoid NaN in CIC
-    valid = np.isfinite(pos[:, 0]) & np.isfinite(pos[:, 1])
+    pos_xy = _dust_pos_plane(pos, axis)
+    valid = np.isfinite(pos_xy[:, 0]) & np.isfinite(pos_xy[:, 1])
     if not np.any(valid):
         return np.zeros((nx, nx), dtype=np.float64)
-    pos = pos[valid]
+    pos_xy = pos_xy[valid]
     masses = masses[valid]
-    return cic_deposit_2d(pos, masses, nx, box_size=box_size)
+    return cic_deposit_2d(pos_xy, masses, nx, box_size=box_size)
 
 
 def get_output_numbers(run_dir: Path, start: int | None, end: int | None) -> list[int]:
