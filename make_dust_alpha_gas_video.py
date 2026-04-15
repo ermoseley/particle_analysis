@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
 Video: gas column density in colorcet isolum (hue ~ log gas / mean), dust column
-as multiplicative darkening (clear → black), fixed scales from last output.
+as multiplicative darkening (clear → black). Spatial means for normalization and
+color limits are taken from the last output only; every frame uses those same
+means so the field evolves against a fixed reference. Each colorbar's vmin/vmax
+is the min and max of that log field on the last frame only (not per-frame).
 
 No titles or axis annotations; left grayscale colorbar (dust log), right isolum
 colorbar (gas log). Default projection integrates along x (yz plane).
@@ -51,18 +54,17 @@ def _orient_like_column_video(arr: np.ndarray) -> np.ndarray:
     return np.transpose(arr, (1, 0, 2))
 
 
-def compute_log_limits(log_field: np.ndarray, min_half_span: float = 0.25) -> tuple[float, float]:
-    """Symmetric-ish span around mean of log field (single map), for stable color limits."""
-    v = np.asarray(log_field, dtype=np.float64).ravel()
+def log_vmin_vmax_from_last_frame(log_last: np.ndarray) -> tuple[float, float]:
+    """vmin/vmax = finite min/max of the log field on the last snapshot only."""
+    v = np.asarray(log_last, dtype=np.float64).ravel()
     v = v[np.isfinite(v)]
     if v.size == 0:
         return -1.0, 1.0
-    mean_log = float(np.mean(v))
-    min_log = float(np.min(v))
-    max_log = float(np.max(v))
-    half_span = max((max_log - min_log) / 2 * 1.1, float(np.std(v)) * 1.5)
-    half_span = max(half_span, min_half_span)
-    return mean_log - half_span, mean_log + half_span
+    vmin = float(np.min(v))
+    vmax = float(np.max(v))
+    if vmin >= vmax:
+        vmax = vmin + 1e-9
+    return vmin, vmax
 
 
 def render_frame(
@@ -206,8 +208,8 @@ def main() -> None:
         dust_n = dust_col_last / md
         log_g_last = np.log10(gas_n + FLOOR)
         log_d_last = np.log10(dust_n + FLOOR)
-        vmin_g, vmax_g = compute_log_limits(log_g_last)
-        vmin_d, vmax_d = compute_log_limits(log_d_last)
+        vmin_g, vmax_g = log_vmin_vmax_from_last_frame(log_g_last)
+        vmin_d, vmax_d = log_vmin_vmax_from_last_frame(log_d_last)
         print(f"  gas log:  vmin={vmin_g:.4f}, vmax={vmax_g:.4f}")
         print(f"  dust log: vmin={vmin_d:.4f}, vmax={vmax_d:.4f}")
 
@@ -217,12 +219,7 @@ def main() -> None:
                 print(f"Frame {i + 1}/{n_frames} (output_{output_num:05d})")
             gas_col = get_gas_column(run_dir, output_num, args.nx, cache=args.cache_gas, axis=axis)
             dust_col = get_dust_column(run_dir, output_num, args.nx, axis=axis)
-            mg = np.mean(gas_col)
-            md = np.mean(dust_col)
-            if mg <= 0:
-                mg = 1.0
-            if md <= 0:
-                md = 1.0
+            # Same mg, md as last frame (not per-frame means)
             log_g = np.log10(gas_col / mg + FLOOR)
             log_d = np.log10(dust_col / md + FLOOR)
             out_path = frames_dir / f"frame_{output_num:05d}.png"
