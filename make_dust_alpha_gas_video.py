@@ -115,6 +115,9 @@ def render_frame(
         orientation="vertical",
     )
     cb_d.set_label(DUST_CB_LABEL)
+    # Left colorbar: put ticks on outer (left) side, axis label on inner (right) side
+    cb_d.ax.yaxis.set_ticks_position("left")
+    cb_d.ax.yaxis.set_label_position("right")
 
     cb_g = fig.colorbar(
         ScalarMappable(norm=norm_g, cmap=GAS_CMAP),
