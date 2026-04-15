@@ -1,25 +1,30 @@
 #!/usr/bin/env python3
 """
 Video: gas column density in colorcet CET_I3 (isoluminant cyan-magenta) with
-dust overlay whose alpha is set by dust column density and whose color is set by
-the line-of-sight mass-weighted mean grain size.
+dust overlay whose alpha is set by dust column density and whose color encodes a
+grain-size statistic along the line of sight.
 
-Spatial means for gas and dust-column normalization, the grain-size conversion to
-microns, and all colorbar limits are derived from the last output only.
+Default mode is ``mean-dev``: deposit the direct dust moments ``Σm`` and
+``Σ(m a)`` from the stored particle ``size`` field, then display
+``log10(a_mean_los / a_ref_last)`` where ``a_ref_last`` is the last snapshot's
+global dust-mass-weighted mean grain size. This makes true mean-size deviations
+visible while preserving the fixed-last-frame normalization used by the other
+video scripts.
 
-No titles or axes. Colorbars:
-  - left:  dust column density (white -> black), ticks/label on the left
-  - right: gas column density (CET_I3)
-  - bottom: grain size (yellow -> black), tick labels in microns
+``mean-abs`` shows the direct LOS mass-weighted mean grain size.
+``legacy-binned`` preserves the older 16-bin median-in-bin surrogate.
 
-Usage:
-  python make_dust_grainsize_gas_video.py --run-dir /path/to/run --start 1 --end 50
+Use ``--nx 128`` (default) to match a 128^3 column sampling; coarser ``--nx``
+is only for quick tests.
+
+Gas and dust column log-contrast colorbars use the **last** snapshot in the
+requested range: symmetric limits ``±deltav`` about 0, with
+``deltav = max(|min|, |max|)`` of ``log10(ρ/⟨ρ⟩)`` on that frame.
 """
+
 from __future__ import annotations
 
 import argparse
-import re
-import subprocess
 from pathlib import Path
 
 import colorcet as cc
@@ -29,220 +34,93 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.cm import ScalarMappable
-from matplotlib.colors import LinearSegmentedColormap, Normalize
+from matplotlib.colors import LinearSegmentedColormap, Normalize, TwoSlopeNorm
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-from make_column_density_video import (
+from column_utils import get_gas_column
+from dust_projection import (
+    global_mass_weighted_mean_size,
+    legacy_binned_mean_size_map,
+    logsize_bin_edges_from_sizes,
+    mean_size_from_moments,
+    project_dust_moments,
+    read_dust_snapshot,
+)
+from video_common import (
     FLOOR,
     FRAME_DPI,
     FRAME_HEIGHT_PX,
     FRAME_WIDTH_PX,
-    _dust_pos_plane,
-    cic_deposit_2d,
-    get_gas_column,
+    discover_frame_names,
+    encode_frames,
     get_output_numbers,
+    log_vmin_vmax_from_last_frame,
+    orient_like_column_video,
+    symmetric_log_vmin_vmax_from_last_frame,
+    write_concat_frame_list,
 )
-
 
 GAS_CMAP = cc.cm["CET_I3"]
 DUST_COL_CMAP = LinearSegmentedColormap.from_list("dust_col_wb", [(1.0, 1.0, 1.0), (0.0, 0.0, 0.0)])
+# Yellow (small grains) → black (large grains); same for mean-dev and mean-abs.
 GRAIN_CMAP = LinearSegmentedColormap.from_list("grain_yk", [(1.0, 1.0, 0.0), (0.0, 0.0, 0.0)])
+
+N_GRAIN_BINS = 16
+
+# Column integration grid per side (128×128 maps); matches typical 128³ runs.
+COLUMN_NX_DEFAULT = 128
 
 DUST_COL_LABEL = r"$\log_{10}\rho_{\rm dust}/\langle \rho_{\rm dust}\rangle$"
 GAS_COL_LABEL = r"$\log_{10}\rho_{\rm gas}/\langle \rho_{\rm gas}\rangle$"
 GRAIN_LABEL = r"$a\ [{\rm \mu m}]$"
 
 
-def _orient_like_column_video(arr: np.ndarray) -> np.ndarray:
-    """Match imshow orientation used in the existing column-density scripts."""
-    if arr.ndim == 2:
-        return arr.T
-    return np.transpose(arr, (1, 0, 2))
+def grain_colorbar_ticks(vmin: float, vmax: float, ref_micron: float) -> tuple[np.ndarray, list[str]]:
+    """Generate bottom colorbar ticks shown in microns."""
+    ticks = np.linspace(vmin, vmax, 5)
+    labels = [f"{ref_micron * (10.0 ** t):.3g}" for t in ticks]
+    return ticks, labels
 
 
-def log_vmin_vmax_from_last_frame(log_last: np.ndarray) -> tuple[float, float]:
-    """vmin/vmax = finite min/max of the log field on the last snapshot only."""
-    v = np.asarray(log_last, dtype=np.float64).ravel()
-    v = v[np.isfinite(v)]
-    if v.size == 0:
-        return -1.0, 1.0
-    vmin = float(np.min(v))
-    vmax = float(np.max(v))
-    if vmin >= vmax:
-        vmax = vmin + 1e-9
-    return vmin, vmax
-
-
-def read_dust_header_fields(output_dir: Path) -> list[str]:
-    """Return ordered field names from dust_header.txt."""
-    header_path = output_dir / "dust_header.txt"
-    fields: list[str] = []
-    for raw in header_path.read_text().splitlines():
-        line = raw.strip()
-        if not line or line.startswith("Total number"):
-            continue
-        if line.startswith("Particle fields"):
-            continue
-        fields.extend(line.split())
-    if not fields:
-        raise ValueError(f"No particle fields found in {header_path}")
-    return fields
-
-
-def read_output_ndim(output_dir: Path) -> int:
-    """Read `ndim` from info.txt in the output directory."""
-    info_path = output_dir / "info.txt"
-    for raw in info_path.read_text().splitlines():
-        if raw.strip().startswith("ndim"):
-            _, value = raw.split("=", 1)
-            return int(value)
-    raise ValueError(f"Could not read ndim from {info_path}")
-
-
-def _expand_real_block_specs(fields: list[str], ndim: int) -> list[str]:
-    """Expand header field names into the ordered float32 stream blocks."""
-    int_fields = {"level", "birth_id", "id", "identity", "merging_id", "tracking_id"}
-    vector_fields = {"pos", "vel", "accel", "angmom"}
-    reals: list[str] = []
-    for name in fields:
-        if name in int_fields:
-            continue
-        if name in vector_fields:
-            for idim in range(ndim):
-                reals.append(f"{name}_{idim}")
-        else:
-            reals.append(name)
-    return reals
-
-
-def read_dust_pos_mass_size(run_dir: Path, output_num: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Read dust stream files for one snapshot, extracting only positions, mass, and size.
-
-    The field order is parsed from dust_header.txt so extra float fields like
-    charge/mu_adb/vpara are skipped safely.
-    """
-    output_dir = Path(run_dir) / f"output_{output_num:05d}"
-    fields = read_dust_header_fields(output_dir)
-    ndim = read_output_ndim(output_dir)
-    real_fields = _expand_real_block_specs(fields, ndim)
-
-    if "mass" not in real_fields or "size" not in real_fields:
-        raise ValueError(f"dust_header.txt in {output_dir} must include mass and size")
-
-    dust_files = sorted(output_dir.glob("dust.*"))
-    if not dust_files:
-        return np.empty((0, 3), dtype=np.float64), np.empty((0,), dtype=np.float64), np.empty((0,), dtype=np.float64)
-
-    pos_list: list[np.ndarray] = []
-    mass_list: list[np.ndarray] = []
-    size_list: list[np.ndarray] = []
-
-    for path in dust_files:
-        mm = path.read_bytes()
-        if len(mm) < 8:
-            continue
-        npart = int(np.frombuffer(mm, dtype=np.int32, count=1, offset=4)[0])
-        if npart <= 0:
-            continue
-
-        stride = npart * 4
-        offset = 8
-        real_data: dict[str, np.ndarray] = {}
-        for name in real_fields:
-            real_data[name] = np.frombuffer(mm, dtype=np.float32, count=npart, offset=offset).astype(np.float64)
-            offset += stride
-
-        pos = np.column_stack([real_data[f"pos_{idim}"] for idim in range(ndim)])
-        mass = real_data["mass"]
-        size = real_data["size"]
-
-        valid = (
-            np.isfinite(pos[:, 0])
-            & np.isfinite(pos[:, 1])
-            & np.isfinite(pos[:, 2])
-            & np.isfinite(mass)
-            & np.isfinite(size)
-        )
-        if not np.any(valid):
-            continue
-        pos_list.append(pos[valid])
-        mass_list.append(mass[valid])
-        size_list.append(size[valid])
-
-    if not pos_list:
-        return np.empty((0, 3), dtype=np.float64), np.empty((0,), dtype=np.float64), np.empty((0,), dtype=np.float64)
-
-    return (
-        np.concatenate(pos_list, axis=0),
-        np.concatenate(mass_list, axis=0),
-        np.concatenate(size_list, axis=0),
-    )
-
-
-def get_dust_column_and_mean_size(
+def compute_direct_mean_size_map(
     run_dir: Path,
     output_num: int,
     nx: int,
-    axis: str = "x",
-    box_size: float = 1.0,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Return dust column density, LOS mass-weighted mean grain size, and raw size values.
-
-    mean_size[pix] = sum(m_i * a_i) / sum(m_i)
-    """
-    pos, masses, sizes = read_dust_pos_mass_size(run_dir, output_num)
-    if masses.size == 0:
-        z = np.zeros((nx, nx), dtype=np.float64)
-        return z.copy(), np.full((nx, nx), np.nan, dtype=np.float64), sizes
-
-    pos_xy = _dust_pos_plane(pos, axis)
-    valid = (
-        np.isfinite(pos_xy[:, 0])
-        & np.isfinite(pos_xy[:, 1])
-        & np.isfinite(masses)
-        & np.isfinite(sizes)
-        & (sizes > 0.0)
-    )
-    if not np.any(valid):
-        z = np.zeros((nx, nx), dtype=np.float64)
-        return z.copy(), np.full((nx, nx), np.nan, dtype=np.float64), sizes[valid]
-
-    pos_xy = pos_xy[valid]
-    masses = masses[valid]
-    sizes = sizes[valid]
-
-    sum_m = cic_deposit_2d(pos_xy, masses, nx, box_size=box_size)
-    sum_ma = cic_deposit_2d(pos_xy, masses * sizes, nx, box_size=box_size)
-
-    mean_size = np.full_like(sum_m, np.nan, dtype=np.float64)
-    np.divide(sum_ma, sum_m, out=mean_size, where=sum_m > 0.0)
-    return sum_m, mean_size, sizes
+    axis: str,
+    box_size: float,
+):
+    """Return dust column mass, direct LOS mean size, and the dust snapshot."""
+    snapshot = read_dust_snapshot(run_dir, output_num)
+    moments = project_dust_moments(snapshot, nx, axis=axis, box_size=box_size)
+    sum_m = moments["sum_m"]
+    mean_size = mean_size_from_moments(sum_m, moments["sum_ma"])
+    return sum_m, mean_size, snapshot
 
 
-def size_scale_to_micron(size_last: np.ndarray, peak_micron: float = 0.23) -> float:
-    """Map the geometric-center peak of the simulated size range to `peak_micron`."""
-    size_last = np.asarray(size_last, dtype=np.float64)
-    size_last = size_last[np.isfinite(size_last) & (size_last > 0.0)]
-    if size_last.size == 0:
-        raise ValueError("No positive dust grain sizes found in last snapshot")
-
-    a_min = float(np.min(size_last))
-    a_max = float(np.max(size_last))
-    if a_max <= 0.0 or a_min <= 0.0:
-        raise ValueError("Dust grain sizes must be positive")
-
-    log_a_peak = np.log10(a_min) + 0.5 * np.log10(a_max / a_min)
-    a_peak_dimless = 10.0 ** log_a_peak
-    return peak_micron / a_peak_dimless
-
-
-def grain_colorbar_ticks(vmin: float, vmax: float) -> tuple[np.ndarray, list[str]]:
-    """Generate bottom colorbar ticks shown in microns."""
-    ticks = np.linspace(vmin, vmax, 5)
-    labels = [f"{0.23 * (10.0 ** t):.3g}" for t in ticks]
-    return ticks, labels
+def compute_grain_stat_map(
+    run_dir: Path,
+    output_num: int,
+    nx: int,
+    *,
+    axis: str,
+    box_size: float,
+    field_mode: str,
+    grain_bins: str,
+    logsize_edges: np.ndarray | None = None,
+):
+    """Return dust column mass, grain statistic map, and the dust snapshot."""
+    if field_mode == "legacy-binned":
+        return legacy_binned_mean_size_map(
+            run_dir,
+            output_num,
+            nx,
+            axis=axis,
+            box_size=box_size,
+            grain_bins=grain_bins,
+            n_bins=N_GRAIN_BINS,
+            logsize_edges=logsize_edges,
+        )
+    return compute_direct_mean_size_map(run_dir, output_num, nx, axis=axis, box_size=box_size)
 
 
 def render_frame(
@@ -255,26 +133,33 @@ def render_frame(
     vmax_dcol: float,
     vmin_grain: float,
     vmax_grain: float,
+    field_mode: str,
+    grain_ref_micron: float,
     out_path: Path,
     box_size: float = 1.0,
     dpi: int | None = None,
 ) -> None:
+    """Render one composite frame."""
     if dpi is None:
         dpi = FRAME_DPI
     figsize = (FRAME_WIDTH_PX / dpi, FRAME_HEIGHT_PX / dpi)
 
     norm_g = Normalize(vmin=vmin_g, vmax=vmax_g, clip=True)
     norm_dcol = Normalize(vmin=vmin_dcol, vmax=vmax_dcol, clip=True)
-    norm_grain = Normalize(vmin=vmin_grain, vmax=vmax_grain, clip=True)
+    if field_mode == "mean-dev":
+        norm_grain = TwoSlopeNorm(vmin=vmin_grain, vcenter=0.0, vmax=vmax_grain)
+    else:
+        norm_grain = Normalize(vmin=vmin_grain, vmax=vmax_grain, clip=True)
+    grain_cmap = GRAIN_CMAP
 
     gas_rgb = ScalarMappable(norm=norm_g, cmap=GAS_CMAP).to_rgba(log_g)[..., :3]
-    grain_rgb = ScalarMappable(norm=norm_grain, cmap=GRAIN_CMAP).to_rgba(log_grain)[..., :3]
+    grain_rgb = ScalarMappable(norm=norm_grain, cmap=grain_cmap).to_rgba(log_grain)[..., :3]
     alpha = np.clip(norm_dcol(log_dcol), 0.0, 1.0)
     alpha = np.where(np.isfinite(log_dcol), alpha, 0.0)
 
     rgb = (1.0 - alpha[..., None]) * gas_rgb + alpha[..., None] * grain_rgb
     rgb = np.clip(rgb, 0.0, 1.0)
-    disp = _orient_like_column_video(rgb)
+    disp = orient_like_column_video(rgb)
 
     fig, ax = plt.subplots(figsize=figsize)
     ax.imshow(
@@ -296,7 +181,6 @@ def render_frame(
         cax=cax_d,
         orientation="vertical",
     )
-    # Dust: ticks and axis label both on the left (outer) side of the colorbar
     cb_d.set_label(DUST_COL_LABEL, labelpad=14)
     cb_d.ax.yaxis.set_ticks_position("left")
     cb_d.ax.yaxis.set_label_position("left")
@@ -309,11 +193,11 @@ def render_frame(
     cb_g.set_label(GAS_COL_LABEL)
 
     cb_a = fig.colorbar(
-        ScalarMappable(norm=norm_grain, cmap=GRAIN_CMAP),
+        ScalarMappable(norm=norm_grain, cmap=grain_cmap),
         cax=cax_a,
         orientation="horizontal",
     )
-    tick_vals, tick_labels = grain_colorbar_ticks(vmin_grain, vmax_grain)
+    tick_vals, tick_labels = grain_colorbar_ticks(vmin_grain, vmax_grain, grain_ref_micron)
     cb_a.set_ticks(tick_vals)
     cb_a.set_ticklabels(tick_labels)
     cb_a.set_label(GRAIN_LABEL)
@@ -324,12 +208,17 @@ def render_frame(
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Gas density + LOS mass-weighted dust grain-size video from mini-ramses outputs.",
+        description="Gas (CET_I3) + dust column alpha + LOS grain-size statistic.",
     )
     ap.add_argument("--run-dir", type=Path, default=Path("."), help="Run directory (output_XXXXX)")
     ap.add_argument("--start", type=int, default=None, help="First output number (inclusive)")
     ap.add_argument("--end", type=int, default=None, help="Last output number (inclusive)")
-    ap.add_argument("--nx", type=int, default=128, help="Grid size (default 128)")
+    ap.add_argument(
+        "--nx",
+        type=int,
+        default=COLUMN_NX_DEFAULT,
+        help=f"Column-density grid resolution per side (default {COLUMN_NX_DEFAULT}, e.g. 128³-style maps)",
+    )
     ap.add_argument(
         "--axis",
         type=str,
@@ -358,6 +247,42 @@ def main() -> None:
         action="store_true",
         help="Skip rendering; only run ffmpeg on existing frame_*.png in --frames-dir",
     )
+    ap.add_argument(
+        "--field-mode",
+        type=str,
+        default="mean-dev",
+        choices=("mean-dev", "mean-abs", "legacy-binned"),
+        help=(
+            "mean-dev (default): direct LOS mass-weighted mean-size deviation relative to the "
+            "last snapshot global mean. mean-abs: direct LOS mass-weighted mean size. "
+            "legacy-binned: older 16-bin median-in-bin surrogate."
+        ),
+    )
+    ap.add_argument(
+        "--grain-bins",
+        type=str,
+        default="logsize",
+        choices=("identity", "logsize"),
+        help=(
+            "Legacy binning for --field-mode legacy-binned only. logsize: 16 log-spaced size bins. "
+            "identity: 16 equal particle-ID ranges."
+        ),
+    )
+    ap.add_argument(
+        "--grain-micron-per-code",
+        type=float,
+        default=23.0,
+        help=(
+            "Linear code→µm scale: a[µm] = a[code] × this value. "
+            "Default 23 corresponds to median 0.23 µm at size 0.01 code (0.23/0.01)."
+        ),
+    )
+    ap.add_argument(
+        "--grain-ref-micron",
+        type=float,
+        default=0.23,
+        help="Reference grain size in µm for mean-abs color scale log10(a/a_ref) (default 0.23).",
+    )
     args = ap.parse_args()
 
     run_dir = args.run_dir.resolve()
@@ -372,18 +297,7 @@ def main() -> None:
     output_numbers: list[int] = []
 
     if args.ffmpeg_only:
-        if not frames_dir.is_dir():
-            raise SystemExit(f"Frames directory not found: {frames_dir}")
-        frame_pattern = re.compile(r"frame_(\d+)\.png$")
-        found: list[tuple[int, str]] = []
-        for f in frames_dir.iterdir():
-            if f.is_file():
-                m = frame_pattern.match(f.name)
-                if m:
-                    found.append((int(m.group(1)), f.name))
-        if not found:
-            raise SystemExit(f"No frame_*.png found in {frames_dir}")
-        frame_names = [name for _, name in sorted(found)]
+        frame_names = discover_frame_names(frames_dir)
         print(f"Found {len(frame_names)} frames in {frames_dir}")
     else:
         output_numbers = get_output_numbers(run_dir, args.start, args.end)
@@ -391,9 +305,22 @@ def main() -> None:
 
         last = output_numbers[-1]
         print(f"Computing reference limits from last output {last} (axis={axis}) ...")
+        logsize_edges: np.ndarray | None = None
+        snapshot_last = read_dust_snapshot(run_dir, last)
+        if args.field_mode == "legacy-binned" and args.grain_bins == "logsize":
+            logsize_edges = logsize_bin_edges_from_sizes(snapshot_last.size, N_GRAIN_BINS)
+            print(f"  grain-bins=logsize: {N_GRAIN_BINS} log-spaced edges from last output sizes")
+
         gas_col_last = get_gas_column(run_dir, last, args.nx, cache=args.cache_gas, axis=axis)
-        dust_col_last, mean_size_last, size_last = get_dust_column_and_mean_size(
-            run_dir, last, args.nx, axis=axis, box_size=args.box_size
+        dust_col_last, grain_stat_last, snapshot_last = compute_grain_stat_map(
+            run_dir,
+            last,
+            args.nx,
+            axis=axis,
+            box_size=args.box_size,
+            field_mode=args.field_mode,
+            grain_bins=args.grain_bins,
+            logsize_edges=logsize_edges,
         )
 
         mg_last = float(np.mean(gas_col_last))
@@ -403,21 +330,47 @@ def main() -> None:
         if md_last <= 0.0:
             md_last = 1.0
 
-        to_micron = size_scale_to_micron(size_last)
-        mean_size_last_micron = mean_size_last * to_micron
+        to_micron = float(args.grain_micron_per_code)
+        grain_stat_last_micron = grain_stat_last * to_micron
+        ref_mean_size_last = global_mass_weighted_mean_size(snapshot_last)
+        ref_mean_size_last_micron = ref_mean_size_last * to_micron
+        a_ref_um = float(args.grain_ref_micron)
 
         log_g_last = np.log10(gas_col_last / mg_last + FLOOR)
         log_dcol_last = np.log10(dust_col_last / md_last + FLOOR)
-        log_grain_last = np.log10(mean_size_last_micron / 0.23)
+        if args.field_mode == "mean-dev":
+            log_grain_last = np.log10(grain_stat_last / ref_mean_size_last)
+            vmin_grain, vmax_grain = symmetric_log_vmin_vmax_from_last_frame(log_grain_last)
+            grain_ref_micron = ref_mean_size_last_micron
+        else:
+            log_grain_last = np.log10(grain_stat_last_micron / a_ref_um)
+            vmin_grain, vmax_grain = log_vmin_vmax_from_last_frame(log_grain_last)
+            grain_ref_micron = a_ref_um
 
-        vmin_g, vmax_g = log_vmin_vmax_from_last_frame(log_g_last)
-        vmin_dcol, vmax_dcol = log_vmin_vmax_from_last_frame(log_dcol_last)
-        vmin_grain, vmax_grain = log_vmin_vmax_from_last_frame(log_grain_last)
+        # Symmetric log₁₀(ρ/⟨ρ⟩) colorbars from last frame: ± deltav with
+        # deltav = max(|min|, |max|) over all pixels (center 0, clip OOB on other frames).
+        vmin_g, vmax_g = symmetric_log_vmin_vmax_from_last_frame(log_g_last)
+        vmin_dcol, vmax_dcol = symmetric_log_vmin_vmax_from_last_frame(log_dcol_last)
 
-        print(f"  gas log:        vmin={vmin_g:.4f}, vmax={vmax_g:.4f}")
-        print(f"  dust col log:   vmin={vmin_dcol:.4f}, vmax={vmax_dcol:.4f}")
+        g_data_min, g_data_max = log_vmin_vmax_from_last_frame(log_g_last)
+        d_data_min, d_data_max = log_vmin_vmax_from_last_frame(log_dcol_last)
+        g_deltav = float(vmax_g)
+        d_deltav = float(vmax_dcol)
+        print(
+            f"  gas log:        symmetric ±{g_deltav:.4f} "
+            f"(last-frame log₁₀ range {g_data_min:.4f} … {g_data_max:.4f})"
+        )
+        print(
+            f"  dust col log:   symmetric ±{d_deltav:.4f} "
+            f"(last-frame log₁₀ range {d_data_min:.4f} … {d_data_max:.4f})"
+        )
         print(f"  grain size log: vmin={vmin_grain:.4f}, vmax={vmax_grain:.4f}")
-        print(f"  grain scale:    peak=0.23 micron, factor={to_micron:.6e} micron/code")
+        print(
+            f"  grain scale:    {to_micron:g} micron/code "
+            f"(linear; ref display {a_ref_um:g} µm for mean-abs)"
+        )
+        if args.field_mode == "mean-dev":
+            print(f"  grain ref mean: {ref_mean_size_last_micron:.6e} micron")
 
         n_frames = len(output_numbers)
         for i, output_num in enumerate(output_numbers):
@@ -425,14 +378,24 @@ def main() -> None:
                 print(f"Frame {i + 1}/{n_frames} (output_{output_num:05d})")
 
             gas_col = get_gas_column(run_dir, output_num, args.nx, cache=args.cache_gas, axis=axis)
-            dust_col, mean_size, _ = get_dust_column_and_mean_size(
-                run_dir, output_num, args.nx, axis=axis, box_size=args.box_size
+            dust_col, grain_stat, _ = compute_grain_stat_map(
+                run_dir,
+                output_num,
+                args.nx,
+                axis=axis,
+                box_size=args.box_size,
+                field_mode=args.field_mode,
+                grain_bins=args.grain_bins,
+                logsize_edges=logsize_edges,
             )
 
-            mean_size_micron = mean_size * to_micron
             log_g = np.log10(gas_col / mg_last + FLOOR)
             log_dcol = np.log10(dust_col / md_last + FLOOR)
-            log_grain = np.log10(mean_size_micron / 0.23)
+            if args.field_mode == "mean-dev":
+                log_grain = np.log10(grain_stat / ref_mean_size_last)
+            else:
+                grain_stat_micron = grain_stat * to_micron
+                log_grain = np.log10(grain_stat_micron / a_ref_um)
 
             out_path = frames_dir / f"frame_{output_num:05d}.png"
             render_frame(
@@ -445,69 +408,25 @@ def main() -> None:
                 vmax_dcol,
                 vmin_grain,
                 vmax_grain,
+                args.field_mode,
+                grain_ref_micron,
                 out_path,
                 box_size=args.box_size,
             )
 
     list_file = frames_dir / "frame_list.txt"
-    duration_sec = 1.0 / args.fps
-    with open(list_file, "w") as f:
-        if args.ffmpeg_only:
-            for name in frame_names:
-                f.write(f"file '{name}'\n")
-                f.write(f"duration {duration_sec}\n")
-            f.write(f"file '{frame_names[-1]}'\n")
-        else:
-            for output_num in output_numbers:
-                f.write(f"file 'frame_{output_num:05d}.png'\n")
-                f.write(f"duration {duration_sec}\n")
-            f.write(f"file 'frame_{output_numbers[-1]:05d}.png'\n")
+    if args.ffmpeg_only:
+        write_concat_frame_list(list_file, args.fps, frame_names=frame_names)
+    else:
+        write_concat_frame_list(list_file, args.fps, output_numbers=output_numbers)
 
     out_video = args.out_video.resolve()
     if not out_video.is_absolute():
         out_video = (run_dir / out_video).resolve()
     out_video.parent.mkdir(parents=True, exist_ok=True)
 
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(list_file),
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-        "-crf",
-        "18",
-        str(out_video),
-    ]
     print("Running ffmpeg ...")
-    result = subprocess.run(cmd, cwd=str(frames_dir))
-    if result.returncode != 0:
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(list_file),
-            "-c:v",
-            "mpeg4",
-            "-pix_fmt",
-            "yuv420p",
-            "-q:v",
-            "2",
-            str(out_video),
-        ]
-        result = subprocess.run(cmd, cwd=str(frames_dir))
-    if result.returncode != 0:
-        raise SystemExit(f"ffmpeg failed with code {result.returncode}")
+    encode_frames(list_file, frames_dir, out_video)
     print(f"Saved {out_video}")
 
     if not args.ffmpeg_only and not args.keep_frames:

@@ -15,9 +15,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import re
-import subprocess
-import sys
 from pathlib import Path
 
 import colorcet as cc
@@ -30,14 +27,18 @@ from matplotlib.cm import ScalarMappable
 from matplotlib.colors import LinearSegmentedColormap, Normalize
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-from make_column_density_video import (
+from column_utils import get_dust_column, get_gas_column
+from video_common import (
     FLOOR,
     FRAME_DPI,
     FRAME_HEIGHT_PX,
     FRAME_WIDTH_PX,
-    get_dust_column,
-    get_gas_column,
+    discover_frame_names,
     get_output_numbers,
+    log_vmin_vmax_from_last_frame,
+    orient_like_column_video,
+    write_concat_frame_list,
+    encode_frames,
 )
 
 GAS_CMAP = cc.cm["isolum"]
@@ -45,28 +46,6 @@ DUST_CMAP = LinearSegmentedColormap.from_list("dust_wb", [(1.0, 1.0, 1.0), (0.0,
 
 DUST_CB_LABEL = r"$\log_{10}\rho_{\rm dust}/\langle \rho_{\rm dust}\rangle$"
 GAS_CB_LABEL = r"$\log_{10}\rho_{\rm gas}/\langle \rho_{\rm gas}\rangle$"
-
-
-def _orient_like_column_video(arr: np.ndarray) -> np.ndarray:
-    """Match imshow orientation used in make_column_density_video (transpose first two dims)."""
-    if arr.ndim == 2:
-        return arr.T
-    return np.transpose(arr, (1, 0, 2))
-
-
-def log_vmin_vmax_from_last_frame(log_last: np.ndarray) -> tuple[float, float]:
-    """vmin/vmax = finite min/max of the log field on the last snapshot only."""
-    v = np.asarray(log_last, dtype=np.float64).ravel()
-    v = v[np.isfinite(v)]
-    if v.size == 0:
-        return -1.0, 1.0
-    vmin = float(np.min(v))
-    vmax = float(np.max(v))
-    if vmin >= vmax:
-        vmax = vmin + 1e-9
-    return vmin, vmax
-
-
 def render_frame(
     log_g: np.ndarray,
     log_d: np.ndarray,
@@ -93,7 +72,7 @@ def render_frame(
     out_rgb = (1.0 - alpha[..., None]) * rgb
     out_rgb = np.clip(out_rgb, 0.0, 1.0)
 
-    disp = _orient_like_column_video(out_rgb)
+    disp = orient_like_column_video(out_rgb)
 
     fig, ax = plt.subplots(figsize=figsize)
     ax.imshow(
@@ -180,18 +159,7 @@ def main() -> None:
     output_numbers: list[int] = []
 
     if args.ffmpeg_only:
-        if not frames_dir.is_dir():
-            raise SystemExit(f"Frames directory not found: {frames_dir}")
-        frame_pattern = re.compile(r"frame_(\d+)\.png$")
-        found: list[tuple[int, str]] = []
-        for f in frames_dir.iterdir():
-            if f.is_file():
-                m = frame_pattern.match(f.name)
-                if m:
-                    found.append((int(m.group(1)), f.name))
-        if not found:
-            raise SystemExit(f"No frame_*.png found in {frames_dir}")
-        frame_names = [name for _, name in sorted(found)]
+        frame_names = discover_frame_names(frames_dir)
         print(f"Found {len(frame_names)} frames in {frames_dir}")
     else:
         output_numbers = get_output_numbers(run_dir, args.start, args.end)
@@ -238,64 +206,18 @@ def main() -> None:
             )
 
     list_file = frames_dir / "frame_list.txt"
-    duration_sec = 1.0 / args.fps
-    with open(list_file, "w") as f:
-        if args.ffmpeg_only:
-            for name in frame_names:
-                f.write(f"file '{name}'\n")
-                f.write(f"duration {duration_sec}\n")
-            f.write(f"file '{frame_names[-1]}'\n")
-        else:
-            for output_num in output_numbers:
-                f.write(f"file 'frame_{output_num:05d}.png'\n")
-                f.write(f"duration {duration_sec}\n")
-            f.write(f"file 'frame_{output_numbers[-1]:05d}.png'\n")
+    if args.ffmpeg_only:
+        write_concat_frame_list(list_file, args.fps, frame_names=frame_names)
+    else:
+        write_concat_frame_list(list_file, args.fps, output_numbers=output_numbers)
 
     out_video = args.out_video.resolve()
     if not out_video.is_absolute():
         out_video = (run_dir / out_video).resolve()
     out_video.parent.mkdir(parents=True, exist_ok=True)
 
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(list_file),
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-        "-crf",
-        "18",
-        str(out_video),
-    ]
     print("Running ffmpeg ...")
-    result = subprocess.run(cmd, cwd=str(frames_dir))
-    if result.returncode != 0:
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(list_file),
-            "-c:v",
-            "mpeg4",
-            "-pix_fmt",
-            "yuv420p",
-            "-q:v",
-            "2",
-            str(out_video),
-        ]
-        result = subprocess.run(cmd, cwd=str(frames_dir))
-    if result.returncode != 0:
-        raise SystemExit(f"ffmpeg failed with code {result.returncode}")
+    encode_frames(list_file, frames_dir, out_video)
     print(f"Saved {out_video}")
 
     if not args.ffmpeg_only and not args.keep_frames:
