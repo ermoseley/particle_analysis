@@ -860,12 +860,14 @@ def rd_amr(nout,**kwargs):
         else:
             filename = path+"/output_"+car1+"/amr."+car2
 
-        offset = 12 + 4*(nlevelmax+1-levelmin)
+        offset = int(12 + 4 * (nlevelmax + 1 - levelmin))
         for ilevel in range(levelmin-1,nlevelmax):
-            ncache = numbl[ilevel,icpu-1]
+            # int64-safe counts (numbl is int32; ncache * nvar can overflow int32 on huge AMR)
+            ncache = int(numbl[ilevel, icpu - 1])
+            count = ncache * nvar
 
-            transfer = np.fromfile(filename,dtype=np.int32,count=nvar*ncache,offset=offset)
-            transfer = np.reshape(transfer,(ncache,nvar))
+            transfer = np.fromfile(filename, dtype=np.int32, count=count, offset=offset)
+            transfer = np.reshape(transfer, (ncache, nvar))
             transfer = np.transpose(transfer)
 
             # Store grid Cartesian index
@@ -876,7 +878,7 @@ def rd_amr(nout,**kwargs):
             for ind in range(0,2**ndim):
                 amr[ilevel].refined[ind,iskip[ilevel]:iskip[ilevel]+ncache] = transfer[ndim+ind]
 
-            offset = offset + ncache*nvar*4
+            offset = offset + count * 4
             iskip[ilevel] = iskip[ilevel] + ncache
 
     return amr
@@ -964,15 +966,17 @@ def rd_hydro(nout,**kwargs):
         else:
             filename = path+"/output_"+car1+"/"+prefix+"."+car2
 
-        offset = 16 + 4*(nlevelmax+1-levelmin)
+        offset = int(16 + 4 * (nlevelmax + 1 - levelmin))
 
         for ilevel in range(levelmin-1,nlevelmax):
-            ncache = numbl[ilevel,icpu-1]
+            # int64-safe counts (numbl is int32; ncache * nvartot overflows int32 on large runs)
+            ncache = int(numbl[ilevel, icpu - 1])
+            count = ncache * nvartot
 
             if(backup):
-                transfer = np.fromfile(filename,dtype=np.float64,count=nvartot*ncache,offset=offset)
+                transfer = np.fromfile(filename,dtype=np.float64,count=count,offset=offset)
             else:
-                transfer = np.fromfile(filename,dtype=np.float32,count=nvartot*ncache,offset=offset)
+                transfer = np.fromfile(filename,dtype=np.float32,count=count,offset=offset)
 
             transfer = np.reshape(transfer,(ncache,nvar,2**ndim))
             transfer = np.transpose(transfer,(1,2,0))
@@ -983,9 +987,9 @@ def rd_hydro(nout,**kwargs):
                     hydro[ilevel].u[ivar,ind,iskip[ilevel]:iskip[ilevel]+ncache] = transfer[ivar,ind]
 
             if(backup):
-                offset = offset + ncache*nvartot*8
+                offset = offset + count * 8
             else:
-                offset = offset + ncache*nvartot*4
+                offset = offset + count * 4
 
             iskip[ilevel] = iskip[ilevel] + ncache
 
