@@ -33,6 +33,8 @@ You need `gfortran`. The binary `utils/f90/part2cube` is used by `plot_denoised_
 - **dust_projection.py** — raw `dust.*` reader and shared dust LOS moment projections (`Σm`, `Σm a`, optional `Σm a^2`) plus the legacy binned-median path.
 - **dust_hd23.py** — published HD23 Equation 18/25 distributions, independent log-size quadrature, active/passive partitioning, and distinct number/mass/area family weights.
 - **validate_hd23_deposition.py** — fast Stage 6/7 analytic, normalization, CIC/TSC, family-mass, and rank-count reconstruction checks for massless GC outputs.
+- **dust_charge_equilibrium.py** — Stage 9 float64 equilibrium-charge reference, twelve-size-knot float32 Coulomb-moment table generator for continuous grain radii, Gaussian-cgs code-unit conversion, and Epstein+Coulomb charging-timescale audit.
+- **validate_dust_charge_equilibrium.py** — focused Stage 9 distribution, float32-table, charge-zero, and timescale checks.
 - **make_column_density_video.py** — gas + dust column-density frames and MP4.
 - **make_dust_alpha_gas_video.py** — same inputs, but gas uses colorcet **isolum** (log column / mean) and dust modulates darkness (alpha); default projection integrates along **x** (`--axis x`).
 - **make_dust_grainsize_gas_video.py** — gas uses colorcet **CET_I3**; dust alpha follows dust column density; default dust hue shows the direct LOS mass-weighted mean-size deviation `log10(a_mean_los / a_ref_last)` from the stored particle `size` field, with `a_ref_last` taken from the last snapshot global dust-mass-weighted mean. The older 16-bin median-in-bin surrogate remains available via `--field-mode legacy-binned` (default **`--nx 128`** for 128³-style maps; default projection **x**).
