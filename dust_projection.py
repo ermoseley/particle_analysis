@@ -23,9 +23,14 @@ class DustSnapshot:
     """Dust particle data extracted from one output snapshot."""
 
     pos: np.ndarray
-    mass: np.ndarray
+    mass: np.ndarray | None
     size: np.ndarray
     particle_id: np.ndarray
+
+    @property
+    def has_mass(self) -> bool:
+        """Whether the output stream contains an explicit particle mass."""
+        return self.mass is not None
 
 
 def read_dust_header_fields(output_dir: Path) -> list[str]:
@@ -42,6 +47,8 @@ def read_dust_header_fields(output_dir: Path) -> list[str]:
             continue
         if not after_particle_fields:
             continue
+        if line.startswith("GC restart trailer") or line.startswith("id_bytes="):
+            break
         fields.extend(line.split())
     if not fields:
         raise ValueError(f"No particle fields found in {header_path}")
@@ -120,21 +127,137 @@ def _extract_particle_id(mm: bytes, npart: int, fields: list[str], ndim: int) ->
     raise ValueError("dust_header has no birth_id / id / identity field for grain binning")
 
 
+def _particle_id_layout(
+    stream_nbytes: int,
+    npart: int,
+    fields: list[str],
+    ndim: int,
+) -> tuple[int, np.dtype]:
+    """Locate the primary particle-ID block in a header-described stream."""
+    offset = 8 + 4 * npart * len(_expand_real_block_specs(fields, ndim))
+    for name in fields[_first_int_field_index(fields) :]:
+        nl = name.lower()
+        if nl in INT32_BLOCK_FIELDS:
+            offset += 4 * npart
+        elif nl in ID_HEADER_FIELDS:
+            remaining = stream_nbytes - offset
+            width = remaining // npart
+            if remaining != width * npart or width not in (4, 8):
+                raise ValueError(
+                    f"dust stream ID field {name!r}: cannot infer width "
+                    f"(remaining={remaining}, npart={npart})"
+                )
+            if nl in ("birth_id", "id", "identity"):
+                return offset, np.dtype(np.int32 if width == 4 else np.int64)
+            offset += width * npart
+        else:
+            raise ValueError(f"Unexpected field {name!r} in integer tail of dust stream")
+    raise ValueError("dust_header has no birth_id / id / identity field for grain binning")
+
+
+def iter_dust_snapshot_blocks(
+    run_dir: Path,
+    output_num: int,
+    *,
+    chunk_size: int = 1_000_000,
+):
+    """Yield bounded, header-aware blocks from mass-bearing or massless GC output."""
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    output_dir = Path(run_dir) / f"output_{output_num:05d}"
+    fields = read_dust_header_fields(output_dir)
+    ndim = read_output_ndim(output_dir)
+    real_fields = _expand_real_block_specs(fields, ndim)
+    if "size" not in real_fields:
+        raise ValueError(f"dust_header.txt in {output_dir} must include size")
+    has_mass = "mass" in real_fields
+
+    for path in sorted(output_dir.glob("dust.*")):
+        stream = np.memmap(path, dtype=np.uint8, mode="r")
+        if stream.size < 8:
+            continue
+        npart = int(np.frombuffer(stream, dtype=np.int32, count=1, offset=4)[0])
+        if npart <= 0:
+            continue
+        real_offsets = {
+            name: 8 + index * npart * 4 for index, name in enumerate(real_fields)
+        }
+        id_offset, id_dtype = _particle_id_layout(
+            stream.size, npart, fields, ndim
+        )
+        for start in range(0, npart, chunk_size):
+            count = min(chunk_size, npart - start)
+            pos = np.full((count, 3), np.nan, dtype=np.float64)
+            for idim in range(min(ndim, 3)):
+                pos[:, idim] = np.frombuffer(
+                    stream,
+                    dtype=np.float32,
+                    count=count,
+                    offset=real_offsets[f"pos_{idim}"] + 4 * start,
+                )
+            size = np.array(
+                np.frombuffer(
+                    stream,
+                    dtype=np.float32,
+                    count=count,
+                    offset=real_offsets["size"] + 4 * start,
+                ),
+                dtype=np.float64,
+                copy=True,
+            )
+            mass = None
+            if has_mass:
+                mass = np.array(
+                    np.frombuffer(
+                        stream,
+                        dtype=np.float32,
+                        count=count,
+                        offset=real_offsets["mass"] + 4 * start,
+                    ),
+                    dtype=np.float64,
+                    copy=True,
+                )
+            particle_id = np.array(
+                np.frombuffer(
+                    stream,
+                    dtype=id_dtype,
+                    count=count,
+                    offset=id_offset + id_dtype.itemsize * start,
+                ),
+                dtype=np.int64,
+                copy=True,
+            )
+            valid = np.isfinite(size)
+            if mass is not None:
+                valid &= np.isfinite(mass)
+            for idim in range(min(ndim, 3)):
+                valid &= np.isfinite(pos[:, idim])
+            if np.any(valid):
+                yield DustSnapshot(
+                    pos=pos[valid],
+                    mass=mass[valid] if mass is not None else None,
+                    size=size[valid],
+                    particle_id=particle_id[valid],
+                )
+        del stream
+
+
 def read_dust_snapshot(run_dir: Path, output_num: int) -> DustSnapshot:
-    """Read dust particle positions, masses, sizes, and IDs for one output."""
+    """Read positions, optional masses, sizes, and IDs for one dust output."""
     output_dir = Path(run_dir) / f"output_{output_num:05d}"
     fields = read_dust_header_fields(output_dir)
     ndim = read_output_ndim(output_dir)
     real_fields = _expand_real_block_specs(fields, ndim)
 
-    if "mass" not in real_fields or "size" not in real_fields:
-        raise ValueError(f"dust_header.txt in {output_dir} must include mass and size")
+    if "size" not in real_fields:
+        raise ValueError(f"dust_header.txt in {output_dir} must include size")
+    has_mass = "mass" in real_fields
 
     dust_files = sorted(output_dir.glob("dust.*"))
     if not dust_files:
         return DustSnapshot(
             pos=np.empty((0, 3), dtype=np.float64),
-            mass=np.empty((0,), dtype=np.float64),
+            mass=np.empty((0,), dtype=np.float64) if has_mass else None,
             size=np.empty((0,), dtype=np.float64),
             particle_id=np.empty((0,), dtype=np.int64),
         )
@@ -162,11 +285,13 @@ def read_dust_snapshot(run_dir: Path, output_num: int) -> DustSnapshot:
         pos = np.full((npart, 3), np.nan, dtype=np.float64)
         for idim in range(min(ndim, 3)):
             pos[:, idim] = real_data[f"pos_{idim}"]
-        mass = real_data["mass"]
+        mass = real_data["mass"] if has_mass else None
         size = real_data["size"]
         particle_id = _extract_particle_id(mm, npart, fields, ndim)
 
-        valid = np.isfinite(mass) & np.isfinite(size)
+        valid = np.isfinite(size)
+        if mass is not None:
+            valid &= np.isfinite(mass)
         if ndim >= 1:
             valid &= np.isfinite(pos[:, 0])
         if ndim >= 2:
@@ -177,38 +302,86 @@ def read_dust_snapshot(run_dir: Path, output_num: int) -> DustSnapshot:
             continue
 
         pos_list.append(pos[valid])
-        mass_list.append(mass[valid])
+        if mass is not None:
+            mass_list.append(mass[valid])
         size_list.append(size[valid])
         id_list.append(particle_id[valid])
 
     if not pos_list:
         return DustSnapshot(
             pos=np.empty((0, 3), dtype=np.float64),
-            mass=np.empty((0,), dtype=np.float64),
+            mass=np.empty((0,), dtype=np.float64) if has_mass else None,
             size=np.empty((0,), dtype=np.float64),
             particle_id=np.empty((0,), dtype=np.int64),
         )
 
     return DustSnapshot(
         pos=np.concatenate(pos_list, axis=0),
-        mass=np.concatenate(mass_list, axis=0),
+        mass=np.concatenate(mass_list, axis=0) if has_mass else None,
         size=np.concatenate(size_list, axis=0),
         particle_id=np.concatenate(id_list, axis=0),
     )
 
 
-def valid_dust_particle_mask(snapshot: DustSnapshot, axis: str = "x") -> np.ndarray:
+def valid_dust_particle_mask(
+    snapshot: DustSnapshot,
+    axis: str = "x",
+    *,
+    require_mass: bool = True,
+) -> np.ndarray:
     """Mask particles valid for a dust LOS projection."""
-    if snapshot.mass.size == 0:
+    if snapshot.size.size == 0:
         return np.zeros((0,), dtype=bool)
+    if require_mass and snapshot.mass is None:
+        raise ValueError(
+            "This dust output has no mass field; provide explicit reconstructed "
+            "HD23 weights instead of treating the following size block as mass"
+        )
     pos_xy = dust_pos_plane(snapshot.pos, axis)
-    return (
+    valid = (
         np.isfinite(pos_xy[:, 0])
         & np.isfinite(pos_xy[:, 1])
-        & np.isfinite(snapshot.mass)
         & np.isfinite(snapshot.size)
         & (snapshot.size > 0.0)
     )
+    if require_mass:
+        valid &= np.isfinite(snapshot.mass)
+    return valid
+
+
+def project_weighted_dust_moments(
+    snapshot: DustSnapshot,
+    weights: np.ndarray,
+    nx: int,
+    axis: str = "x",
+    box_size: float = 1.0,
+    include_second_moment: bool = False,
+) -> dict[str, np.ndarray]:
+    """Project an explicit particle weight and its size moments with CIC."""
+    weights = np.asarray(weights, dtype=np.float64).ravel()
+    if weights.size != snapshot.size.size:
+        raise ValueError("weights and dust snapshot length mismatch")
+    valid = valid_dust_particle_mask(snapshot, axis=axis, require_mass=False)
+    valid &= np.isfinite(weights)
+    zero = np.zeros((nx, nx), dtype=np.float64)
+    if not np.any(valid):
+        out = {"sum_w": zero.copy(), "sum_wa": zero.copy()}
+        if include_second_moment:
+            out["sum_wa2"] = zero.copy()
+        return out
+
+    pos_xy = dust_pos_plane(snapshot.pos[valid], axis)
+    weight = weights[valid]
+    size = snapshot.size[valid]
+    out = {
+        "sum_w": cic_deposit_2d(pos_xy, weight, nx, box_size=box_size),
+        "sum_wa": cic_deposit_2d(pos_xy, weight * size, nx, box_size=box_size),
+    }
+    if include_second_moment:
+        out["sum_wa2"] = cic_deposit_2d(
+            pos_xy, weight * size * size, nx, box_size=box_size
+        )
+    return out
 
 
 def project_dust_moments(
@@ -219,24 +392,25 @@ def project_dust_moments(
     include_second_moment: bool = False,
 ) -> dict[str, np.ndarray]:
     """Project direct dust moments onto a 2D LOS map."""
-    valid = valid_dust_particle_mask(snapshot, axis=axis)
-    zero = np.zeros((nx, nx), dtype=np.float64)
-    if not np.any(valid):
-        out = {"sum_m": zero.copy(), "sum_ma": zero.copy()}
-        if include_second_moment:
-            out["sum_ma2"] = zero.copy()
-        return out
-
-    pos_xy = dust_pos_plane(snapshot.pos[valid], axis)
-    mass = snapshot.mass[valid]
-    size = snapshot.size[valid]
-
+    if snapshot.mass is None:
+        raise ValueError(
+            "Direct mass moments require an explicit mass field; use "
+            "project_weighted_dust_moments with reconstructed HD23 weights"
+        )
+    weighted = project_weighted_dust_moments(
+        snapshot,
+        snapshot.mass,
+        nx,
+        axis=axis,
+        box_size=box_size,
+        include_second_moment=include_second_moment,
+    )
     out = {
-        "sum_m": cic_deposit_2d(pos_xy, mass, nx, box_size=box_size),
-        "sum_ma": cic_deposit_2d(pos_xy, mass * size, nx, box_size=box_size),
+        "sum_m": weighted["sum_w"],
+        "sum_ma": weighted["sum_wa"],
     }
     if include_second_moment:
-        out["sum_ma2"] = cic_deposit_2d(pos_xy, mass * size * size, nx, box_size=box_size)
+        out["sum_ma2"] = weighted["sum_wa2"]
     return out
 
 
@@ -257,17 +431,29 @@ def std_size_from_moments(sum_m: np.ndarray, sum_ma: np.ndarray, sum_ma2: np.nda
     return np.sqrt(var)
 
 
-def global_mass_weighted_mean_size(snapshot: DustSnapshot) -> float:
-    """Return the global dust-mass-weighted mean grain size for a snapshot."""
-    valid = np.isfinite(snapshot.mass) & np.isfinite(snapshot.size) & (snapshot.size > 0.0)
+def global_weighted_mean_size(snapshot: DustSnapshot, weights: np.ndarray) -> float:
+    """Return the global mean size for an explicit particle weight."""
+    weights = np.asarray(weights, dtype=np.float64).ravel()
+    if weights.size != snapshot.size.size:
+        raise ValueError("weights and dust snapshot length mismatch")
+    valid = np.isfinite(weights) & np.isfinite(snapshot.size) & (snapshot.size > 0.0)
     if not np.any(valid):
         raise ValueError("No positive finite dust particles for mean size")
-    mass = snapshot.mass[valid]
+    weight = weights[valid]
     size = snapshot.size[valid]
-    total_mass = float(np.sum(mass))
-    if total_mass <= 0.0:
-        raise ValueError("Dust total mass must be positive for mean size")
-    return float(np.sum(mass * size) / total_mass)
+    total_weight = float(np.sum(weight))
+    if total_weight <= 0.0:
+        raise ValueError("Dust total weight must be positive for mean size")
+    return float(np.sum(weight * size) / total_weight)
+
+
+def global_mass_weighted_mean_size(snapshot: DustSnapshot) -> float:
+    """Return the global dust-mass-weighted mean grain size for a snapshot."""
+    if snapshot.mass is None:
+        raise ValueError(
+            "This dust output has no mass field; reconstruct HD23 mass weights first"
+        )
+    return global_weighted_mean_size(snapshot, snapshot.mass)
 
 
 def median_size_per_bin(sizes: np.ndarray, bin_idx: np.ndarray, n_bins: int) -> np.ndarray:
@@ -315,9 +501,14 @@ def legacy_binned_mean_size_map(
 ) -> tuple[np.ndarray, np.ndarray, DustSnapshot]:
     """Reproduce the current binned-median LOS effective size map."""
     snapshot = read_dust_snapshot(run_dir, output_num)
-    if snapshot.mass.size == 0:
+    if snapshot.size.size == 0:
         z = np.zeros((nx, nx), dtype=np.float64)
         return z.copy(), np.full((nx, nx), np.nan, dtype=np.float64), snapshot
+    if snapshot.mass is None:
+        raise ValueError(
+            "Legacy binned projection requires a stored mass field and is not "
+            "valid for massless GC dust output"
+        )
 
     if grain_bins == "identity":
         output_dir = Path(run_dir) / f"output_{output_num:05d}"

@@ -169,6 +169,27 @@ def get_dust_column(
     axis: str = "z",
 ) -> np.ndarray:
     """Load dust particles and deposit onto a 2D grid with CIC; return column mass map."""
+    output_dir = Path(run_dir) / f"output_{output_num:05d}"
+    header_path = output_dir / "dust_header.txt"
+    if header_path.exists():
+        fields: list[str] = []
+        in_fields = False
+        for raw in header_path.read_text().splitlines():
+            line = raw.strip()
+            if line.startswith("Particle fields"):
+                in_fields = True
+                continue
+            if line.startswith("GC restart trailer") or line.startswith("id_bytes="):
+                break
+            if in_fields and line:
+                fields.extend(line.split())
+        if fields and "mass" not in fields:
+            raise ValueError(
+                f"{header_path} has no mass field. GC dust writes size after "
+                "velocity, so miniramses.rd_part would silently interpret size "
+                "as mass; use dust_hd23.py to reconstruct explicit weights."
+            )
+
     import miniramses as ram
 
     p = ram.rd_part(output_num, path=str(run_dir) + "/", prefix="dust", silent=True)

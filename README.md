@@ -31,6 +31,8 @@ You need `gfortran`. The binary `utils/f90/part2cube` is used by `plot_denoised_
 - **video_common.py** — shared frame sizing, last-frame log ranges, frame-list writing, and `ffmpeg` encode helpers for the video scripts.
 - **column_utils.py** — shared gas and dust column helpers (`get_gas_column`, `get_dust_column`, CIC deposition, projection helpers).
 - **dust_projection.py** — raw `dust.*` reader and shared dust LOS moment projections (`Σm`, `Σm a`, optional `Σm a^2`) plus the legacy binned-median path.
+- **dust_hd23.py** — published HD23 Equation 18/25 distributions, independent log-size quadrature, active/passive partitioning, and distinct number/mass/area family weights.
+- **validate_hd23_deposition.py** — fast Stage 6/7 analytic, normalization, CIC/TSC, family-mass, and rank-count reconstruction checks for massless GC outputs.
 - **make_column_density_video.py** — gas + dust column-density frames and MP4.
 - **make_dust_alpha_gas_video.py** — same inputs, but gas uses colorcet **isolum** (log column / mean) and dust modulates darkness (alpha); default projection integrates along **x** (`--axis x`).
 - **make_dust_grainsize_gas_video.py** — gas uses colorcet **CET_I3**; dust alpha follows dust column density; default dust hue shows the direct LOS mass-weighted mean-size deviation `log10(a_mean_los / a_ref_last)` from the stored particle `size` field, with `a_ref_last` taken from the last snapshot global dust-mass-weighted mean. The older 16-bin median-in-bin surrogate remains available via `--field-mode legacy-binned` (default **`--nx 128`** for 128³-style maps; default projection **x**).
@@ -65,6 +67,46 @@ Re-encode existing frames only:
 python make_dust_alpha_gas_video.py --ffmpeg-only --frames-dir /path/to/run/frames_dust_alpha
 python make_dust_grainsize_gas_video.py --ffmpeg-only --frames-dir /path/to/run/frames_dust_grainsize
 ```
+
+## HD23 and surface-area validation
+
+Run the dependency-light analytic and synthetic CIC/TSC checks:
+
+```bash
+python validate_hd23_deposition.py
+```
+
+Validate a Stage 6/7 output, or compare particle-output reconstructions written
+with different MPI rank counts:
+
+```bash
+python validate_hd23_deposition.py \
+  --output-dir /path/to/run_1rank/output_00010 \
+  --output-dir /path/to/run_8rank/output_00010 \
+  --nx 64 --scheme both --field area2 --report hd23_validation.json
+```
+
+The output `info.txt` should carry
+`dust_hd23_revision = HD23-2023-eq18-eq25-v1`, the resolved active size
+bounds, `dust_grain_bulk_density`, and either `dust_radius_code_to_cm` or the
+usual `unit_d` and `unit_l`. The validator streams each rank file in bounded
+chunks and reconstructs the log-sampled broad-component weights with the
+required Jacobian. It also closes the exported C2/C3, area, macro-mass, and
+total dust-to-gas normalizations. Actual post-flush GPU-field rank invariance
+is checked separately from `dust_area_checksum` in the mini-RAMSES Stage 6/7
+MPI gate; a CPU reconstruction is not a substitute for that check.
+
+- number weight is proportional to `a f(a) dln(a)`
+- mass weight is proportional to `a^4 f(a) dln(a)`
+- deposited area weight is proportional to `a^3 f(a) dln(a)`
+
+Here `f(a) = (1/n_H) dn/da`. Keep these three weights distinct.
+
+Regular GC dust outputs do not store particle mass: their scalar block after
+velocity is `size`. The legacy `miniramses.rd_part` and `part2cube` readers
+interpret that block as mass and therefore produce a physically wrong dust
+column. `column_utils.get_dust_column` now rejects such outputs; use the HD23
+reconstruction path explicitly.
 
 ## Grain-size interpretation
 
