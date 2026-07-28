@@ -167,8 +167,10 @@ def get_dust_column(
     nx: int,
     box_size: float = 1.0,
     axis: str = "z",
+    *,
+    chunk_size: int = 1_000_000,
 ) -> np.ndarray:
-    """Load dust particles and deposit onto a 2D grid with CIC; return column mass map."""
+    """Stream dust particles into a 2D CIC column-mass map."""
     output_dir = Path(run_dir) / f"output_{output_num:05d}"
     header_path = output_dir / "dust_header.txt"
     if header_path.exists():
@@ -183,13 +185,29 @@ def get_dust_column(
                 break
             if in_fields and line:
                 fields.extend(line.split())
-        if fields and "mass" not in fields:
-            raise ValueError(
-                f"{header_path} has no mass field. GC dust writes size after "
-                "velocity, so miniramses.rd_part would silently interpret size "
-                "as mass; use dust_hd23.py to reconstruct explicit weights."
-            )
+        if fields:
+            if "mass" not in fields:
+                raise ValueError(
+                    f"{header_path} has no mass field. GC dust writes size after "
+                    "velocity, so miniramses.rd_part would silently interpret size "
+                    "as mass; use dust_hd23.py to reconstruct explicit weights."
+                )
+            try:
+                from .dust_projection import iter_dust_snapshot_blocks
+            except ImportError:
+                from dust_projection import iter_dust_snapshot_blocks
 
+            grid = np.zeros((nx, nx), dtype=np.float64)
+            for block in iter_dust_snapshot_blocks(
+                run_dir, output_num, chunk_size=chunk_size
+            ):
+                pos_xy = dust_pos_plane(block.pos, axis)
+                grid += cic_deposit_2d(
+                    pos_xy, block.mass, nx, box_size=box_size
+                )
+            return grid
+
+    # Preserve support for older dust streams that predate dust_header.txt.
     import miniramses as ram
 
     p = ram.rd_part(output_num, path=str(run_dir) + "/", prefix="dust", silent=True)

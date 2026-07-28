@@ -31,6 +31,7 @@ You need `gfortran`. The binary `utils/f90/part2cube` is used by `plot_denoised_
 - **video_common.py** — shared frame sizing, last-frame log ranges, frame-list writing, and `ffmpeg` encode helpers for the video scripts.
 - **column_utils.py** — shared gas and dust column helpers (`get_gas_column`, `get_dust_column`, CIC deposition, projection helpers).
 - **dust_projection.py** — raw `dust.*` reader and shared dust LOS moment projections (`Σm`, `Σm a`, optional `Σm a^2`) plus the legacy binned-median path.
+- **ramses_streaming.py** — bounded readers for all regular `nfile` rank files, including hydro-like payloads and the 12-field six-ray stream.
 - **dust_hd23.py** — published HD23 Equation 18/25 distributions, independent log-size quadrature, active/passive partitioning, and distinct number/mass/area family weights.
 - **validate_hd23_deposition.py** — fast Stage 6/7 analytic, normalization, CIC/TSC, family-mass, and rank-count reconstruction checks for massless GC outputs.
 - **make_column_density_video.py** — gas + dust column-density frames and MP4.
@@ -106,7 +107,9 @@ Regular GC dust outputs do not store particle mass: their scalar block after
 velocity is `size`. The legacy `miniramses.rd_part` and `part2cube` readers
 interpret that block as mass and therefore produce a physically wrong dust
 column. `column_utils.get_dust_column` now rejects such outputs; use the HD23
-reconstruction path explicitly.
+reconstruction path explicitly. At production particle counts, consume
+`iter_dust_snapshot_blocks` rather than materializing `read_dust_snapshot`;
+both readers honor the exact `nfile` rank-file set declared by `info.txt`.
 
 ## Grain-size interpretation
 

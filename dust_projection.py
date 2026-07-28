@@ -10,8 +10,10 @@ import numpy as np
 
 try:
     from .column_utils import cic_deposit_2d, dust_pos_plane
+    from .ramses_streaming import read_info_int, regular_output_files
 except ImportError:
     from column_utils import cic_deposit_2d, dust_pos_plane
+    from ramses_streaming import read_info_int, regular_output_files
 
 VECTOR_FLOAT_FIELDS = frozenset({"pos", "vel", "accel", "angmom"})
 INT32_BLOCK_FIELDS = frozenset({"level"})
@@ -57,12 +59,7 @@ def read_dust_header_fields(output_dir: Path) -> list[str]:
 
 def read_output_ndim(output_dir: Path) -> int:
     """Read ``ndim`` from ``info.txt`` in the output directory."""
-    info_path = output_dir / "info.txt"
-    for raw in info_path.read_text().splitlines():
-        if raw.strip().startswith("ndim"):
-            _, value = raw.split("=", 1)
-            return int(value)
-    raise ValueError(f"Could not read ndim from {info_path}")
+    return read_info_int(output_dir, "ndim")
 
 
 def read_dust_npart_tot(output_dir: Path) -> int:
@@ -96,35 +93,6 @@ def _first_int_field_index(fields: list[str]) -> int:
         if nl in INT32_BLOCK_FIELDS or nl in ID_HEADER_FIELDS:
             return i
     return len(fields)
-
-
-def _extract_particle_id(mm: bytes, npart: int, fields: list[str], ndim: int) -> np.ndarray:
-    """Read particle identity from the integer tail of a dust stream."""
-    real_fields = _expand_real_block_specs(fields, ndim)
-    offset = 8 + 4 * npart * len(real_fields)
-    for name in fields[_first_int_field_index(fields) :]:
-        nl = name.lower()
-        if nl in INT32_BLOCK_FIELDS:
-            offset += 4 * npart
-        elif nl in ID_HEADER_FIELDS:
-            rem = len(mm) - offset
-            if npart <= 0:
-                raise ValueError("npart must be positive")
-            id_bytes = rem // npart
-            if rem != id_bytes * npart or id_bytes not in (4, 8):
-                raise ValueError(
-                    f"dust stream ID field {name!r}: cannot infer width (rem={rem}, npart={npart})"
-                )
-            if id_bytes == 4:
-                arr = np.frombuffer(mm, dtype=np.int32, count=npart, offset=offset).astype(np.int64)
-            else:
-                arr = np.frombuffer(mm, dtype=np.int64, count=npart, offset=offset)
-            if nl in ("birth_id", "id", "identity"):
-                return arr
-            offset += id_bytes * npart
-        else:
-            raise ValueError(f"Unexpected field {name!r} in integer tail of dust stream")
-    raise ValueError("dust_header has no birth_id / id / identity field for grain binning")
 
 
 def _particle_id_layout(
@@ -171,13 +139,25 @@ def iter_dust_snapshot_blocks(
     if "size" not in real_fields:
         raise ValueError(f"dust_header.txt in {output_dir} must include size")
     has_mass = "mass" in real_fields
+    expected_particles = read_dust_npart_tot(output_dir)
+    particles_seen = 0
 
-    for path in sorted(output_dir.glob("dust.*")):
+    for path in regular_output_files(output_dir, "dust"):
         stream = np.memmap(path, dtype=np.uint8, mode="r")
         if stream.size < 8:
-            continue
-        npart = int(np.frombuffer(stream, dtype=np.int32, count=1, offset=4)[0])
-        if npart <= 0:
+            raise ValueError(f"{path}: truncated dust header")
+        file_ndim, npart = map(
+            int, np.frombuffer(stream, dtype="<i4", count=2, offset=0)
+        )
+        if file_ndim != ndim or npart < 0:
+            raise ValueError(
+                f"{path}: invalid ndim/count header [{file_ndim}, {npart}]"
+            )
+        particles_seen += npart
+        if npart == 0:
+            if stream.size != 8:
+                raise ValueError(f"{path}: empty dust file has trailing payload")
+            del stream
             continue
         real_offsets = {
             name: 8 + index * npart * 4 for index, name in enumerate(real_fields)
@@ -240,10 +220,15 @@ def iter_dust_snapshot_blocks(
                     particle_id=particle_id[valid],
                 )
         del stream
+    if particles_seen != expected_particles:
+        raise ValueError(
+            f"{output_dir}: dust files contain {particles_seen} particles, "
+            f"dust_header.txt declares {expected_particles}"
+        )
 
 
 def read_dust_snapshot(run_dir: Path, output_num: int) -> DustSnapshot:
-    """Read positions, optional masses, sizes, and IDs for one dust output."""
+    """Materialize one dust output; use the block iterator at production scale."""
     output_dir = Path(run_dir) / f"output_{output_num:05d}"
     fields = read_dust_header_fields(output_dir)
     ndim = read_output_ndim(output_dir)
@@ -253,59 +238,17 @@ def read_dust_snapshot(run_dir: Path, output_num: int) -> DustSnapshot:
         raise ValueError(f"dust_header.txt in {output_dir} must include size")
     has_mass = "mass" in real_fields
 
-    dust_files = sorted(output_dir.glob("dust.*"))
-    if not dust_files:
-        return DustSnapshot(
-            pos=np.empty((0, 3), dtype=np.float64),
-            mass=np.empty((0,), dtype=np.float64) if has_mass else None,
-            size=np.empty((0,), dtype=np.float64),
-            particle_id=np.empty((0,), dtype=np.int64),
-        )
-
     pos_list: list[np.ndarray] = []
     mass_list: list[np.ndarray] = []
     size_list: list[np.ndarray] = []
     id_list: list[np.ndarray] = []
 
-    for path in dust_files:
-        mm = path.read_bytes()
-        if len(mm) < 8:
-            continue
-        npart = int(np.frombuffer(mm, dtype=np.int32, count=1, offset=4)[0])
-        if npart <= 0:
-            continue
-
-        stride = npart * 4
-        offset = 8
-        real_data: dict[str, np.ndarray] = {}
-        for name in real_fields:
-            real_data[name] = np.frombuffer(mm, dtype=np.float32, count=npart, offset=offset).astype(np.float64)
-            offset += stride
-
-        pos = np.full((npart, 3), np.nan, dtype=np.float64)
-        for idim in range(min(ndim, 3)):
-            pos[:, idim] = real_data[f"pos_{idim}"]
-        mass = real_data["mass"] if has_mass else None
-        size = real_data["size"]
-        particle_id = _extract_particle_id(mm, npart, fields, ndim)
-
-        valid = np.isfinite(size)
-        if mass is not None:
-            valid &= np.isfinite(mass)
-        if ndim >= 1:
-            valid &= np.isfinite(pos[:, 0])
-        if ndim >= 2:
-            valid &= np.isfinite(pos[:, 1])
-        if ndim >= 3:
-            valid &= np.isfinite(pos[:, 2])
-        if not np.any(valid):
-            continue
-
-        pos_list.append(pos[valid])
-        if mass is not None:
-            mass_list.append(mass[valid])
-        size_list.append(size[valid])
-        id_list.append(particle_id[valid])
+    for block in iter_dust_snapshot_blocks(run_dir, output_num):
+        pos_list.append(block.pos)
+        if block.mass is not None:
+            mass_list.append(block.mass)
+        size_list.append(block.size)
+        id_list.append(block.particle_id)
 
     if not pos_list:
         return DustSnapshot(
