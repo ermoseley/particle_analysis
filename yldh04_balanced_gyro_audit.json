@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "table_revision": "yldh04-balanced-gyro-logR-logu-xi-f32-v3",
+  "production_default": false,
+  "interpolation": {
+    "drift_and_lower_factor": "local tensor-product float32 PCHIP",
+    "support_diagnostics": "trilinear",
+    "maximum_factor_stencil_nodes": 64,
+    "covariance_reconstruction": "L times transpose(L)"
+  },
+  "refinement": {
+    "baseline_shape": [
+      21,
+      13,
+      13
+    ],
+    "baseline_nodes": 3549,
+    "baseline_generation_seconds": 356.781273,
+    "baseline_npz_bytes": 52462,
+    "baseline_cuda_fortran_include_bytes": 421448,
+    "final_shape": [
+      21,
+      18,
+      21
+    ],
+    "final_nodes": 7938,
+    "reused_baseline_nodes": 3549,
+    "new_nodes": 4389,
+    "incremental_generation_seconds": 458.686949,
+    "total_generation_seconds": 815.468222,
+    "total_seconds_per_node": 0.102730
+  },
+  "artifacts": {
+    "npz": "yldh04_balanced_gyro_table_f32.npz",
+    "npz_bytes": 109646,
+    "npz_sha256": "b5a1fcabc92b8d4eb688fb5cfdf9e683f450dc6c5f8db29285d1f876da6de6ab",
+    "cuda_fortran_include": "yldh04_balanced_gyro_table_f32.inc",
+    "cuda_fortran_include_bytes": 939676,
+    "cuda_fortran_include_sha256": "dde14583ce5f3c61f6c3ce14c0288bd31f804bd3cb691e78712e430d821a9bb1"
+  },
+  "midpoint_audit": {
+    "sampling": "uniform cells without replacement",
+    "seed": 20260727,
+    "sampled_cells": 720,
+    "accepted_cells": 608,
+    "zero_reference_cells": 48,
+    "rejected_support_transition_cells": 112,
+    "rejected_fraction": 0.1555555556,
+    "accepted_relative_covariance_error": {
+      "median": 0.0128784576,
+      "p90": 0.0660668055,
+      "p95": 0.0961583860,
+      "maximum": 0.2457165876
+    },
+    "error_definition": "Frobenius norm of interpolated minus direct covariance divided by direct covariance norm",
+    "rejection_policy": "reject any queried cell that weights both zero and nonzero support corners for either mode"
+  }
+}

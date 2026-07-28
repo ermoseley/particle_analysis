@@ -35,6 +35,8 @@ You need `gfortran`. The binary `utils/f90/part2cube` is used by `plot_denoised_
 - **validate_hd23_deposition.py** — fast Stage 6/7 analytic, normalization, CIC/TSC, family-mass, and rank-count reconstruction checks for massless GC outputs.
 - **dust_charge_equilibrium.py** — Stage 9 float64 equilibrium-charge reference, twelve-size-knot float32 Coulomb-moment table generator for continuous grain radii, Gaussian-cgs code-unit conversion, and Epstein+Coulomb charging-timescale audit.
 - **validate_dust_charge_equilibrium.py** — focused Stage 9 distribution, float32-table, charge-zero, and timescale checks.
+- **dust_yldh_reference.py** — offline float64 YLD04 `|n|=1` reference and compact float32 `yldh04_balanced_gyro` table generator.
+- **validate_dust_yldh_reference.py** — focused resonance, PSD, interpolation, precision, and strict-envelope checks for that reduced table.
 - **make_column_density_video.py** — gas + dust column-density frames and MP4.
 - **make_dust_alpha_gas_video.py** — same inputs, but gas uses colorcet **isolum** (log column / mean) and dust modulates darkness (alpha); default projection integrates along **x** (`--axis x`).
 - **make_dust_grainsize_gas_video.py** — gas uses colorcet **CET_I3**; dust alpha follows dust column density; default dust hue shows the direct LOS mass-weighted mean-size deviation `log10(a_mean_los / a_ref_last)` from the stored particle `size` field, with `a_ref_last` taken from the last snapshot global dust-mass-weighted mean. The older 16-bin median-in-bin surrogate remains available via `--field-mode legacy-binned` (default **`--nx 128`** for 128³-style maps; default projection **x**).
@@ -109,6 +111,37 @@ velocity is `size`. The legacy `miniramses.rd_part` and `part2cube` readers
 interpret that block as mass and therefore produce a physically wrong dust
 column. `column_utils.get_dust_column` now rejects such outputs; use the HD23
 reconstruction path explicitly.
+
+## Reduced YLD04 gyroresonance reference
+
+Generate the practical dimensionless float32 table, deterministic
+CUDA-Fortran include, and SHA-256 sidecars:
+
+```bash
+python dust_yldh_reference.py
+python validate_dust_yldh_reference.py
+```
+
+The checked-in default table and CUDA-Fortran include carry independent
+SHA-256 sidecars. `yldh04_balanced_gyro_audit.json` records their grid,
+generation cost, strict support-boundary rejection rate, and direct-reference
+interpolation errors.
+
+The named selector contains balanced forward/backward `|n|=1`
+gyroresonance from the YLD04 Appendix B3 Alfvén tensor and B4 low-beta fast
+tensor. It does not contain TTD, slow modes, high-beta fast modes, imbalanced
+turbulence, or dynamic cascade/damping axes, and it remains off for
+production. Its axes are `log R`, `log u`, and pitch cosine, with
+`R=v/(|Ω|L)` and `u=v/V_A`; grain mass and size cancel at matched `|Ω|`.
+The unit equal-mode basis may be multiplied by one finite nonnegative wave
+power, while its Alfvén/fast partition, decorrelation kernel, and cutoffs stay
+fixed. The audited default uses a compact nonuniform 21×18×21 grid. Local
+tensor-product PCHIP interpolation of the float32 lower factor preserves PSD;
+support diagnostics remain trilinear. Lookup outside the closed envelope,
+with a changed mode model, or across a zero/nonzero resonance-support
+boundary is rejected. Exact nodes and faces remain usable.
+`YLDH_RUNTIME_PCHIP.md` gives the exact boundary, slope, axis-order, and
+float32-rounding contract for the CUDA implementation.
 
 ## Grain-size interpretation
 
