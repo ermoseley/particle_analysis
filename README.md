@@ -143,8 +143,9 @@ fields in temporary disk-backed arrays, and reconstructs massless GC dust with
 the output's HD23 macro-mass metadata. Pixel correlation and `P_dg/P_gg`,
 `P_dg/sqrt(P_dd*P_gg)` spectra use projected log contrasts on one common grid.
 The default resolved range is `1 <= k <= N/4`; `|B| > --b-floor` defines the
-projected-drift support. Distribution moments are exact; reported quantiles
-use a deterministic bounded sample.
+projected-drift support, with the default `1e-22` matching the production
+mover's `smallc*1e-10`. Distribution moments are exact; reported quantiles use
+a deterministic bounded sample.
 
 Each diffusion length freezes the output's local coefficient over the stated
 interval; it is an endpoint scale, not an integral along a particle history.

@@ -1607,7 +1607,12 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--particle-chunk", type=int, default=1_000_000)
     parser.add_argument("--slab-planes", type=int, default=4)
     parser.add_argument("--max-samples", type=int, default=1_000_000)
-    parser.add_argument("--b-floor", type=float, default=0.0)
+    parser.add_argument(
+        "--b-floor",
+        type=float,
+        default=1.0e-22,
+        help="magnetic support floor (production smallc*1e-10 = 1e-22)",
+    )
     parser.add_argument("--kmax-fraction", type=float, default=0.25)
     parser.add_argument("--scratch-dir", type=Path)
     parser.add_argument(
