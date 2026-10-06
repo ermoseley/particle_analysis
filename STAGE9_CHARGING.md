@@ -45,9 +45,8 @@ published DS87/WD01 current-balance solution, and it does not insert an
 unresolved CR-induced FUV floor.
 
 IM19 Table 1 calibrates silicate fits only through 0.1 micron. Applying the
-0.1-micron fit with constant-potential scaling over the production
-0.0575--0.92 micron span, especially above 0.1 micron, is an explicit
-extrapolation. It is a provisional HD23 astrodust proxy, not published HD23
+0.1-micron fit with constant-potential scaling over the 0.0575--1.52 micron
+knot span, especially above 0.1 micron, is an explicit extrapolation. It is a provisional HD23 astrodust proxy, not published HD23
 charging accuracy.
 
 ## Particle quantities and Gaussian-cgs code units
@@ -81,10 +80,18 @@ The regression `Z(1 micron)=100`, `rho_gr=2 g cm^-3`,
 ## Charge distribution and continuous grain sizes
 
 The normalized integer distribution is used only offline. The float32 runtime
-table stores `<Z^2>` and `<Z^2 ln|Z|>` at twelve logarithmic radius knots.
+table stores `<Z^2>` and `<Z^2 ln|Z|>` at fourteen logarithmic radius knots.
 Stage 6/7 particle radii are continuous, so runtime lookup brackets the actual
 particle radius and interpolates the positive moments in log radius; the
-twelve values are not particle families.
+knots are not particle families. Radii outside the knots are invalid.
+
+The first twelve knots span 0.0575--0.92 micron, the particle support at
+`grain_size_parameter=0.070981082`. The production deck later adopted a
+1.5 times larger value, which moves its support to 0.0862--1.380 micron and
+left the largest 14.6% of grains (in log radius) above the last knot. Two
+knots at the same logarithmic spacing extend the table to 1.523 micron. The
+first twelve rows are bitwise unchanged, so lookups at a <= 0.92 micron are
+unchanged.
 
 For the YLD04 Coulomb logarithm,
 
