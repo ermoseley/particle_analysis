@@ -31,6 +31,7 @@ You need `gfortran`. The binary `utils/f90/part2cube` is used by `plot_denoised_
 - **video_common.py** — shared frame sizing, last-frame log ranges, frame-list writing, and `ffmpeg` encode helpers for the video scripts.
 - **column_utils.py** — shared gas and dust column helpers (`get_gas_column`, `get_dust_column`, CIC deposition, projection helpers).
 - **dust_projection.py** — raw `dust.*` reader and shared dust LOS moment projections (`Σm`, `Σm a`, optional `Σm a^2`) plus the legacy binned-median path.
+- **derefine_families.py** — quasi-Lagrangian de-refinement (Moseley thesis §4.4.2.1) of the CIC dust and gas density cubes per grain family, size group, and all grains, gated on particle count; tests in `tests/test_derefine_families.py`.
 - **make_column_density_video.py** — gas + dust column-density frames and MP4.
 - **make_dust_alpha_gas_video.py** — same inputs, but gas uses colorcet **isolum** (log column / mean) and dust modulates darkness (alpha); default projection integrates along **x** (`--axis x`).
 - **make_dust_grainsize_gas_video.py** — gas uses colorcet **CET_I3**; dust alpha follows dust column density; default dust hue shows the direct LOS mass-weighted mean-size deviation `log10(a_mean_los / a_ref_last)` from the stored particle `size` field, with `a_ref_last` taken from the last snapshot global dust-mass-weighted mean. The older 16-bin median-in-bin surrogate remains available via `--field-mode legacy-binned` (default **`--nx 128`** for 128³-style maps; default projection **x**).
