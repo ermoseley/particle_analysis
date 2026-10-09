@@ -250,3 +250,44 @@ def test_run_rejects_a_cache_that_differs_from_the_published_cubes(tmp_path):
     with pytest.raises(RuntimeError):
         dd.run(snap, 1.0, {}, 1e-6, None)
     assert not (snap / "py_out" / "derefined").exists()
+
+
+def write_reference(tmp_path, snap):
+    """Mimic the paper tool: per-family structure at the family's mean count."""
+    root = snap / "py_out"
+    prefix = json.loads((root / "dust" / "cic" / "metadata.json").read_text())["cache_prefix"]
+    cnt = np.load(prefix + "_dust_num_bins.npy")
+    gas = np.load(root / "gas" / "rho.npy")
+    ref = tmp_path / "paper"
+    ref.mkdir()
+    bins = []
+    for b in range(12):
+        dust = np.load(root / "dust" / "cic" / f"rho_{b + 1:02d}.npy")
+        level, (d, g), st = dd.derefine(cnt[b], [dust, gas], float(cnt[b].sum(dtype=np.float64)) / cnt[b].size)
+        np.save(ref / f"output_00009_cell_derefined_dust_bin{b:02d}.npy", d)
+        np.save(ref / f"output_00009_cell_derefined_gas_bin{b:02d}.npy", g)
+        nodes = {f"{2**L}^3": c for L, c in enumerate(st["nodes_by_level"]) if L >= 1 and c}
+        bins.append({"bin": b, "cells_at_base": st["nodes_by_level"][0], "nodes": nodes})
+    (ref / "output_00009_cell_derefine_meta.json").write_text(json.dumps({"bins": bins}))
+    return ref
+
+
+def test_reference_check_reproduces_the_paper_threshold_and_flags_a_changed_cube(tmp_path):
+    snap, *_ = make_snapshot(tmp_path)
+    ref = write_reference(tmp_path, snap)
+    groups = dd.parse_groups(dd.DEFAULT_GROUPS)
+    # Another threshold than the paper's still passes: the check reruns at the paper's own.
+    dd.run(snap, 1.0, groups, 1e-6, ref)
+    meta = json.loads((snap / "py_out" / "derefined" / "metadata.json").read_text())
+    fam = meta["reference_check"]["families"]["05"]
+    assert fam["nodes_match"] and fam["dust_max_rel_diff"] < 1e-6
+    assert fam["delivered_threshold"] == 1.0
+    # A corrupted reference cube is refused and nothing is published.
+    snap2, *_ = make_snapshot(tmp_path / "b")
+    ref2 = write_reference(tmp_path / "b", snap2)
+    bad = np.load(ref2 / "output_00009_cell_derefined_dust_bin03.npy")
+    bad[0, 0, 0] *= 1.5
+    np.save(ref2 / "output_00009_cell_derefined_dust_bin03.npy", bad)
+    with pytest.raises(RuntimeError):
+        dd.run(snap2, 1.0, groups, 1e-6, ref2)
+    assert not (snap2 / "py_out" / "derefined").exists()

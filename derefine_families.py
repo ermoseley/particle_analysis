@@ -318,36 +318,59 @@ def verify_case(name, out, gate, inputs, threshold, tol):
             "gas_mass_residual": res_g, "zero_dust_cells": zero_dust, "nonfinite_cells": nonfinite}
 
 
-def compare_reference(refdir, out, stats_by_case, cnt_n, log):
-    """Cross-check family cubes against the paper's derefine_cubes output."""
+def _max_rel_diff(a, b):
+    worst = 0.0
+    for i in range(0, a.shape[0], 32):
+        x = a[i:i + 32].astype(np.float64)
+        y = b[i:i + 32].astype(np.float64)
+        worst = max(worst, float((np.abs(x - y) / np.abs(y)).max()))
+    return worst
+
+
+def compare_reference(refdir, out, cnt, root, threshold, log):
+    """Cross-check the family cubes against the paper's derefine_cubes output.
+
+    The paper tool gates on the family's MEAN count per cell (1 + a few 1e-9 here,
+    not exactly 1), and a 2^L block holding exactly one grain sums to 1 within float32
+    rounding, so the structure is sensitive to that last digit. Two comparisons follow:
+    (a) our algorithm run at the paper's threshold, which must reproduce its cubes and
+    node counts; (b) the delivered cubes (the user's threshold) against the paper's,
+    reported for information.
+    """
     refdir = Path(refdir)
+    n = cnt.shape[1]
     ref_meta = json.loads(next(refdir.glob("*_cell_derefine_meta.json")).read_text())
     prefix = next(refdir.glob("*_cell_derefined_dust_bin00.npy")).name.replace("dust_bin00.npy", "")
+    gas = np.load(root / "gas" / "rho.npy", mmap_mode="r")
     result = {"reference_dir": str(refdir), "families": {}}
     for b in range(NFAM):
         name = f"{b + 1:02d}"
-        row = {}
-        for kind in ("dust", "gas"):
-            mine = np.load(out / f"{kind}_{name}.npy", mmap_mode="r")
-            ref = np.load(refdir / f"{prefix}{kind}_bin{b:02d}.npy", mmap_mode="r")
-            assert mine.shape == ref.shape
-            worst = 0.0
-            for i in range(0, mine.shape[0], 32):
-                a = mine[i:i + 32].astype(np.float64)
-                r = ref[i:i + 32].astype(np.float64)
-                worst = max(worst, float((np.abs(a - r) / np.abs(r)).max()))
-            row[f"{kind}_max_rel_diff"] = worst
-        ref_nodes = {k: v for k, v in ref_meta["bins"][b]["nodes"].items()}
-        mine_nodes = {f"{2**L}^3": c for L, c in enumerate(stats_by_case[name]["nodes_by_level"])
-                      if L >= 1 and c}
-        row["nodes_match"] = ref_nodes == mine_nodes
-        row["cells_at_base_match"] = ref_meta["bins"][b]["cells_at_base"] == \
-            stats_by_case[name]["nodes_by_level"][0]
-        row["nodes_mine"], row["nodes_ref"] = mine_nodes, ref_nodes
+        gate = np.asarray(cnt[b], dtype=np.float64)
+        thr_ref = float(gate.sum()) / n**3
+        dust = np.load(root / "dust" / "cic" / f"rho_{b + 1:02d}.npy", mmap_mode="r")
+        level, (d, g), st = derefine(gate, [dust, gas], thr_ref)
+        refd = np.load(refdir / f"{prefix}dust_bin{b:02d}.npy", mmap_mode="r")
+        refg = np.load(refdir / f"{prefix}gas_bin{b:02d}.npy", mmap_mode="r")
+        ref_nodes = ref_meta["bins"][b]["nodes"]
+        nodes = {f"{2**L}^3": c for L, c in enumerate(st["nodes_by_level"]) if L >= 1 and c}
+        row = {
+            "paper_threshold": thr_ref,
+            "dust_max_rel_diff": _max_rel_diff(d, refd), "gas_max_rel_diff": _max_rel_diff(g, refg),
+            "nodes_match": nodes == ref_nodes,
+            "cells_at_base_match": st["nodes_by_level"][0] == ref_meta["bins"][b]["cells_at_base"],
+            "nodes_ours": nodes, "nodes_paper": ref_nodes,
+        }
+        delivered = np.load(out / f"level_{name}.npy", mmap_mode="r")
+        row["delivered_threshold"] = threshold
+        row["delivered_cells_with_different_level"] = int(np.count_nonzero(delivered != level))
+        row["delivered_dust_cells_differing_from_paper"] = int(
+            np.count_nonzero(np.load(out / f"dust_{name}.npy", mmap_mode="r") != refd))
         result["families"][name] = row
-        log(f"reference {name}: dust {row['dust_max_rel_diff']:.2e} gas "
-            f"{row['gas_max_rel_diff']:.2e} nodes_match={row['nodes_match']} "
-            f"base_match={row['cells_at_base_match']}")
+        log(f"reference {name}: at paper threshold {thr_ref!r} dust {row['dust_max_rel_diff']:.2e} "
+            f"gas {row['gas_max_rel_diff']:.2e} nodes_match={row['nodes_match']} "
+            f"base_match={row['cells_at_base_match']}; delivered cubes differ from paper in "
+            f"{row['delivered_dust_cells_differing_from_paper']} cells "
+            f"({row['delivered_dust_cells_differing_from_paper'] / n**3:.2e})")
     return result
 
 
@@ -513,7 +536,7 @@ def run(snapshot, threshold, groups, tol, reference_dir):
 
     reference = None
     if reference_dir:
-        reference = compare_reference(reference_dir, out, stats_by_case, n, log)
+        reference = compare_reference(reference_dir, out, cnt, root, threshold, log)
         bad = [k for k, r in reference["families"].items()
                if not (r["nodes_match"] and r["cells_at_base_match"])
                or max(r["dust_max_rel_diff"], r["gas_max_rel_diff"]) > 1e-6]
