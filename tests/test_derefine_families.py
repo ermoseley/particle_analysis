@@ -57,6 +57,7 @@ def test_matches_recursive_reference(n, seed, thr, shape):
 
 def test_conservation_and_floor():
     counts, dust, gas = random_case(16, 5, 3.0)
+    counts[:8] *= 4.0            # a populated half and a sparse half
     level, (d, g), stats = dd.derefine(counts, [dust, gas], 1.0)
     assert d.dtype == g.dtype == np.float32 and level.dtype == np.uint8
     assert abs(d.sum(dtype=np.float64) / dust.sum(dtype=np.float64) - 1) < 1e-6
