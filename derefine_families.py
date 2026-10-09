@@ -30,6 +30,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import textwrap
 import time
 from pathlib import Path
 
@@ -413,13 +414,7 @@ print(ratio.mean(), ratio[native].mean())
 
 ## Caveats
 
-The cubes are piecewise constant, and structure on scales below the local cell size is
-absent. With about one particle per cell in each family, @FAMFRAC@ of the volume of a
-family cube lies in cells of 2×2×2 or larger, and only @FAMNATIVE@ keeps the native
-resolution. @GROUPFRAC@ The all-grain cube is much closer to native resolution,
-with @ALLFRAC@ of its volume in merged cells, because it has 12 times as many particles.
-Compare different cases only after checking their `level` cubes: a ratio built from a
-small family and one built from all grains are resolved on different scales.
+@CAVEAT@
 
 Volume fractions by cell size, from this run (percent of the volume):
 
@@ -458,15 +453,22 @@ def readme_text(n, cases, stats, bins):
         sel = [[0], [1], [2], range(3, lmax + 1)]
         cells = " | ".join(f"{pct(name, s):.1f}" for s in sel)
         rows.append(f"| `{name}` | {radii[name][0]:.3f}–{radii[name][1]:.3f} | {cells} |")
+    caveat = (
+        "The cubes are piecewise constant, and structure on scales below the local cell size is "
+        "absent. With about one particle per cell in each family, "
+        f"{rng(fam_names, merged)} of the volume of a family cube lies in cells of 2×2×2 or "
+        f"larger, and only {rng(fam_names, native)} keeps the native resolution. "
+        + (f"For the size groups the merged fraction is {gmerged}. " if group_names else "")
+        + f"The all-grain cube is much closer to native resolution, with {pct('all', merged):.0f}% "
+        "of its volume in merged cells, because it has 12 times as many particles. Compare "
+        "different cases only after checking their `level` cubes: a ratio built from a small "
+        "family and one built from all grains are resolved on different scales.")
     text = README
     for key, val in {
         "@N@": str(n),
         "@GROUPROWS@": group_rows,
         "@RADII@": radii_lines,
-        "@FAMFRAC@": rng(fam_names, merged),
-        "@FAMNATIVE@": rng(fam_names, native),
-        "@GROUPFRAC@": f"For the size groups the merged fraction is {gmerged}." if group_names else "",
-        "@ALLFRAC@": f"{pct('all', merged):.0f}%",
+        "@CAVEAT@": textwrap.fill(caveat, 92),
         "@TABLE@": "\n".join(rows),
     }.items():
         text = text.replace(key, val)
